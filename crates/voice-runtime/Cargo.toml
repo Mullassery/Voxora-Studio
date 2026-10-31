@@ -1,0 +1,8 @@
+[package]
+name = "voxora-voice-runtime"
+description = "Deterministic turn-taking, scripted bridge, and WAV inspection for Voxora Studio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

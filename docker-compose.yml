@@ -1,0 +1,39 @@
+# Voxora Studio local stack — SIMULATION ONLY.
+#
+# Honest scope: the orchestrator runs with the mock telephony adapter and
+# never places real calls. No provider credentials are required or used.
+#
+#   docker compose up -d
+#   console: http://localhost:8080   orchestrator: http://localhost:8000/api/v1/health
+#
+# Configure tokens before starting:
+#   export VOXORA_API_TOKENS='{"dev-token": {"tenant_id": "tenant-a", "role": "admin", "name": "Dev Admin"}}'
+
+services:
+  orchestrator:
+    build:
+      context: .
+      dockerfile: services/orchestrator/Dockerfile
+    environment:
+      VOXORA_API_TOKENS: ${VOXORA_API_TOKENS:?set tokens; see header comment}
+      VOXORA_DATABASE_PATH: /data/voxora.db
+      VOXORA_ALLOW_LIVE_CALLS: "false"
+      VOXORA_TELEPHONY_PROVIDER: mock
+      VOXORA_SEED_DEMO: "true"
+      VOXORA_STORAGE: sqlite
+    volumes:
+      - orchestrator-data:/data
+    ports:
+      - "8000:8000"
+
+  console:
+    build:
+      context: .
+      dockerfile: apps/console/Dockerfile
+    depends_on:
+      - orchestrator
+    ports:
+      - "8080:80"
+
+volumes:
+  orchestrator-data:

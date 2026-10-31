@@ -1,0 +1,93 @@
+:root {
+  color-scheme: dark;
+  font-family: system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+  background: #10141c;
+  color: #e6e9ef;
+}
+
+main,
+.login {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 1rem 1.25rem;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+h1 {
+  font-size: 1.2rem;
+  margin-right: auto;
+}
+
+nav {
+  display: flex;
+  gap: 0.4rem;
+}
+
+button {
+  background: #233047;
+  color: inherit;
+  border: 1px solid #35455f;
+  border-radius: 6px;
+  padding: 0.35rem 0.8rem;
+  cursor: pointer;
+}
+
+button.active {
+  background: #34527e;
+}
+
+button.ghost {
+  background: transparent;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 0.75rem;
+  font-size: 0.9rem;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid #232c3d;
+}
+
+pre {
+  background: #0b0f16;
+  border: 1px solid #232c3d;
+  border-radius: 6px;
+  padding: 0.75rem;
+  white-space: pre-wrap;
+}
+
+.muted {
+  color: #9aa4b6;
+}
+
+.error {
+  color: #ff7e7e;
+}
+
+.login form {
+  display: flex;
+  gap: 0.5rem;
+}
+
+input {
+  background: #0b0f16;
+  color: inherit;
+  border: 1px solid #35455f;
+  border-radius: 6px;
+  padding: 0.45rem 0.7rem;
+}
