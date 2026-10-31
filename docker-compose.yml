@@ -10,17 +10,33 @@
 #   export VOXORA_API_TOKENS='{"dev-token": {"tenant_id": "tenant-a", "role": "admin", "name": "Dev Admin"}}'
 
 services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: voxora
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   orchestrator:
+    depends_on:
+      postgres:
+        condition: service_healthy
     build:
       context: .
       dockerfile: services/orchestrator/Dockerfile
     environment:
       VOXORA_API_TOKENS: ${VOXORA_API_TOKENS:?set tokens; see header comment}
-      VOXORA_DATABASE_PATH: /data/voxora.db
+      VOXORA_STORAGE: postgres
+      VOXORA_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/voxora
       VOXORA_ALLOW_LIVE_CALLS: "false"
       VOXORA_TELEPHONY_PROVIDER: mock
       VOXORA_SEED_DEMO: "true"
-      VOXORA_STORAGE: sqlite
     volumes:
       - orchestrator-data:/data
     ports:
@@ -37,3 +53,4 @@ services:
 
 volumes:
   orchestrator-data:
+  pg-data:

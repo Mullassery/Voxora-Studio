@@ -5,7 +5,7 @@ WORKDIR /app
 
 COPY services/orchestrator/pyproject.toml services/orchestrator/README* ./services/orchestrator/
 COPY services/orchestrator/src ./services/orchestrator/src
-RUN pip install --no-cache-dir ./services/orchestrator fastapi==0.115.* uvicorn==0.32.*
+RUN pip install --no-cache-dir ./services/orchestrator fastapi==0.115.* uvicorn==0.32.* "psycopg[binary]==3.2.*"
 
 ENV VOXORA_DATABASE_PATH=/data/voxora.db \
     VOXORA_ALLOW_LIVE_CALLS=false

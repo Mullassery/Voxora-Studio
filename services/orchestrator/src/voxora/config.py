@@ -53,6 +53,8 @@ DEFAULT_TOKENS = {
 class Settings:
     env: str = "development"
     database_path: str = "./data/voxora.db"
+    storage: str = "sqlite"
+    database_url: Optional[str] = None
     secret_key: str = "development-only-secret-key-change-me"
     api_tokens: Dict[str, TenantPrincipal] = field(default_factory=lambda: dict(DEFAULT_TOKENS))
     cors_origins: List[str] = field(
@@ -97,6 +99,8 @@ class Settings:
         settings = cls(
             env=os.getenv("VOXORA_ENV", "development"),
             database_path=os.getenv("VOXORA_DATABASE_PATH", "./data/voxora.db"),
+            storage=os.getenv("VOXORA_STORAGE", "sqlite").strip().lower(),
+            database_url=os.getenv("VOXORA_DATABASE_URL") or None,
             secret_key=os.getenv(
                 "VOXORA_SECRET_KEY", "development-only-secret-key-change-me"
             ),
@@ -121,6 +125,14 @@ class Settings:
         )
         settings.validate()
         return settings
+
+    def validate_storage(self) -> None:
+        if self.storage == "sqlite":
+            return
+        if self.storage != "postgres":
+            raise ValueError("VOXORA_STORAGE must be 'sqlite' or 'postgres'")
+        if not self.database_url:
+            raise ValueError("VOXORA_STORAGE=postgres requires VOXORA_DATABASE_URL")
 
     def validate(self) -> None:
         if len(self.secret_key) < 32:

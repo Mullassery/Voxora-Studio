@@ -101,6 +101,10 @@ class CampaignEngine:
     def run_once(self) -> int:
         """Claim and process one bounded batch. Returns the number of dials."""
         with self._run_lock:
+            for due in self.db.promote_due_campaigns():
+                self.db.audit(
+                    due["tenantId"], "worker", "campaign.due_promoted", "campaign", due["campaignId"]
+                )
             claimed = self.db.claim_recipients(self.global_concurrency)
             if not claimed:
                 return 0

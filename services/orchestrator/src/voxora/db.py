@@ -36,6 +36,17 @@ JSON_COLUMNS = {
 }
 
 
+def database_from_settings(settings: Any) -> Database:
+    """Build the storage backend requested by settings (sqlite | postgres)."""
+    storage = getattr(settings, "storage", "sqlite")
+    if storage == "postgres":
+        from .pg import PostgresDatabase
+
+        url = getattr(settings, "database_url", None) or ""
+        return PostgresDatabase(url)
+    return Database(settings.database_path)
+
+
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -452,9 +463,9 @@ class Database:
                     values.get("source_updated_at"),
                     now,
                     now,
-                    int(preserve_consent),
-                    int(preserve_consent),
-                    int(preserve_consent),
+                    bool(preserve_consent),
+                    bool(preserve_consent),
+                    bool(preserve_consent),
                 ),
             )
             row = connection.execute(
@@ -755,6 +766,30 @@ class Database:
                 (tenant_id, campaign_id, limit, offset),
             ).fetchall()
         return [self._decode(row) for row in rows], int(total)
+
+    def promote_due_campaigns(self) -> List[Dict[str, str]]:
+        """Flip 'scheduled' campaigns to 'running' once their schedule_at passes.
+
+        Called by the worker loop before claiming so time-based scheduling is
+        autonomous. Returns {"tenantId", "campaignId"} rows for auditing.
+        """
+        now = iso()
+        promoted: List[Dict[str, str]] = []
+        with self._write() as connection:
+            due = connection.execute(
+                "SELECT id, tenant_id, status FROM campaigns"
+                " WHERE status='scheduled' AND schedule_at IS NOT NULL AND schedule_at <= ?",
+                (now,),
+            ).fetchall()
+            for row in due:
+                assert_transition(CAMPAIGN_TRANSITIONS, row["status"], "running")
+                connection.execute(
+                    "UPDATE campaigns SET status='running', started_at=?, updated_at=?"
+                    " WHERE id=? AND status='scheduled'",
+                    (dict(row).get("started_at") or now, now, row["id"]),
+                )
+                promoted.append({"tenantId": row["tenant_id"], "campaignId": row["id"]})
+        return promoted
 
     def claim_recipients(self, limit: int) -> List[Dict[str, Any]]:
         """Atomically claim queued recipients and create idempotent call rows."""
@@ -1359,23 +1394,22 @@ class Database:
         payload: Dict[str, Any],
     ) -> bool:
         with self._write() as connection:
-            try:
-                connection.execute(
-                    "INSERT INTO webhook_events (id, tenant_id, connection_id, event_id, event_type,"
-                    " payload, status, received_at) VALUES (?, ?, ?, ?, ?, ?, 'received', ?)",
-                    (
-                        new_id("wh"),
-                        tenant_id,
-                        connection_id,
-                        event_id,
-                        event_type,
-                        json.dumps(payload),
-                        iso(),
-                    ),
-                )
-            except sqlite3.IntegrityError:
-                return False
-        return True
+            cursor = connection.execute(
+                "INSERT INTO webhook_events (id, tenant_id, connection_id, event_id, event_type,"
+                " payload, status, received_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, 'received', ?)"
+                " ON CONFLICT (tenant_id, connection_id, event_id) DO NOTHING",
+                (
+                    new_id("wh"),
+                    tenant_id,
+                    connection_id,
+                    event_id,
+                    event_type,
+                    json.dumps(payload),
+                    iso(),
+                ),
+            )
+            return cursor.rowcount > 0
 
     def mark_webhook_processed(
         self, tenant_id: str, connection_id: str, event_id: str, status: str, error: Optional[str]

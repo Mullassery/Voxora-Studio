@@ -18,7 +18,7 @@ from .campaign import CampaignEngine, CampaignError
 from .config import Settings, TenantPrincipal
 from .crm import build_crm_adapter, provider_catalog
 from .crm.sync import sync_connection
-from .db import Database, iso
+from .db import Database, database_from_settings, iso
 from .models import (
     AgentCreate,
     CampaignCreate,
@@ -170,7 +170,7 @@ def create_app(
     settings = settings or Settings.from_env()
     app = FastAPI(title="Voxora Studio", version=__version__, lifespan=lifespan)
     app.state.settings = settings
-    app.state.db = Database(settings.database_path)
+    app.state.db = database_from_settings(settings)
     app.state.secret_box = SecretBox(settings.secret_key)
     app.state.started_at = None
     app.state.seed = None
