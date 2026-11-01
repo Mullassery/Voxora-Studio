@@ -1,7 +1,7 @@
 # Implementation Audit (honest verification record)
 
-**Repo:** Mullassery/Voxora-Studio (public, was empty; scaffolded locally, not pushed)
-**Date:** 2026-10-31
+**Repo:** Mullassery/Voxora-Studio (public, pushed; CI green)
+**Date:** 2026-10-31 (initial audit) · **Updated:** 2026-11-01 (Phases 1–3, see end)
 **Principle:** every claim below was verified by running the command and reading its output. Unsupported/version-limited checks are stated as such.
 
 ## Environment (verified)
@@ -11,8 +11,8 @@
 | Python | 3.9.6 (system) | `.venv` created for pinned deps |
 | Node | 26.11.1 | |
 | rustc/cargo | 1.99 | |
-| Postgres | running on 5432 (accepted connections) | **not used** — orchestrator uses SQLite WAL |
-| Docker | 29.5.2 | compose stack built and executed end-to-end on 2026-10-31 |
+| Postgres | running on 5432 (accepted connections) | **used since Phase 2** — CI service container + compose + local CI database `voxora_ci` |
+| Docker | 29.5.2 | compose stack built and executed end-to-end on 2026-10-31 and again 2026-11-01 (postgres-backed) |
 
 ## What actually runs (executed commands, this session)
 
@@ -71,7 +71,8 @@ afterwards (`docker compose down -v`).
 
 Note (minor finding): `POST /api/v1/campaigns` silently ignores an inline
 `contact_ids` key instead of rejecting it — the recipients endpoint is the real
-flow. Not fixed in this pass; worth tightening the request model later.
+flow. **Fixed 2026-11-01**: request model is `extra="forbid"`; unknown fields
+now return 422 (tested in `test_api.py`).
 
 ### AI runtime
 
@@ -99,12 +100,11 @@ $ npm run build  # tsc -p tsconfig.json && vite build — 0 errors, 148 kB js / 
 
 - **Real telephony.** The only wired provider is `mock`. The telephony registry exposes exactly one provider. No Twilio SDK code exists; `allow_live_calls=true` + `mock` is rejected by config validation. This build cannot place a real call — by design and by review.
 - **Real LLM.** `ai-runtime` is a deterministic scripted agent; `real_llm: False` is declared in its capabilities.
-- **Docker Compose stack.** ~~Written but not verified~~ **Now verified** (see the compose section above); initial audit-writing pass recorded it as unexecuted before it was run.
-- **CI workflow.** Written (`.github/workflows/ci.yml`) but not executed on GitHub (no remote push was authorized).
+- **Docker Compose stack.** ~~Written but not verified~~ **Now verified twice** (2026-10-31 sqlite-backed; 2026-11-01 postgres-backed with `VOXORA_STORAGE=postgres`).
+- **CI workflow.** ~~Written but not executed~~ **Now green on GitHub** (runs 41192274198 and 41259238748; Python job pinned to `ubuntu-24.04` because 26.04-dropping-3.9; Rust + Node jobs green).
 - **Squid Rust tests.** In the separate Squid-CRM repo, `cargo test -p squid-core` exceeded a 180 s timeout here earlier; unverified locally (recorded then, repeated now: not claimed as passing).
 - **Console↔API live browser test.** The console builds and its API client targets the implemented endpoints; no browser E2E was run.
-- **Postgres.** Detected in the environment but unused; storage is SQLite WAL, a real decision documented in `docs/architecture.md`.
-- **Git push.** Not performed; no authorization.
+- **Live Squid server.** All Squid verification is against source-derived fake transports, never a running Squid instance (the source itself lives in this workspace's Squid-CRM repo, so contract fidelity is high, but it is still not a live-server test).
 
 ## Assumptions made (not verified)
 
@@ -121,3 +121,38 @@ $ npm run build  # tsc -p tsconfig.json && vite build — 0 errors, 148 kB js / 
 | All documented flows tested | ⚠️ core flows tested (59 tests); compose/browser/CI unexecuted |
 | Deployment tools present and verified | ✅ compose built + exercised end-to-end via proxy |
 | No unverified claims | This file is the check. |
+
+---
+
+## Phase 1–3 update (2026-11-01, verified this session)
+
+### CI on GitHub (Phase 1)
+- `gh run watch 41192274198` and `41259238748` — all three jobs (Python 3.9 on `ubuntu-24.04`, Rust, Node) green. Python job pins `ubuntu-24.04` because `ubuntu-latest` (26.04) no longer ships 3.9. The Python job gained a `postgres:16` service container and runs the storage-compat suite with `VOXORA_TEST_PG_URL`.
+
+### Postgres storage + compat suite (Phase 2)
+```
+$ PYTHONPATH=services/orchestrator/src:services/ai-runtime/src .venv/bin/python -m pytest services/orchestrator/tests services/ai-runtime/tests -q
+104 passed
+```
+- 24 of those are `test_storage_compat.py`, parametrized over `sqlite` and `postgres` via the `database` fixture (`conftest.py`); local suite ran against a real Postgres (`postgresql://.../voxora_ci`, createdb). CI ran the same suite against its service container. Portable-SQL parity (upserts, dedupe, CASE WHEN booleans) verified on both.
+- SQL dialect adapter: `voxora/pg.py` (`PostgresDatabase(Database)`); `VOXORA_STORAGE=postgres` + `VOXORA_DATABASE_URL`.
+
+### Scheduling (Phase 2)
+- `test_worker_scheduling.py` (4 tests): scheduled campaigns flip to running only when `schedule_at` arrives; worker-time enforcement verified; audit row `campaign.due_promoted` written.
+
+### Webhook replay harness (Phase 3)
+- `test_webhook_replay.py` (4 tests) drives the actual HTTP endpoint with signed raw bodies: duplicate event-id delivery → `duplicate` no-op; tampered body under original signature → 401 before dedupe; replayed upsert after a deletion does **not** resurrect (dedupe-first win); out-of-order deliveries resolve last-accepted-wins deterministically per external id — semantics pinned in the test docstring and `sync`/`db` code.
+
+### Consent/suppression sync honesty (Phase 3)
+- `crm/sync.py` enrichment is capability-driven: adapters declaring `consent_read`/`suppression_read` get per-record provider consent/suppression pulled and applied during sync; Squid (capacity verified false against client source) is never asked and stays at `unknown` — asserted in `test_crm_contract.py`. Suppression is escalate-only: a provider "clear" never un-suppresses (compliance-safe default, documented in the module docstring). Bad provider states count per-record as `failed` with the reason surfaced.
+- Also honest: adapters that *claim* a capability but raise `NotSupportedError` produce per-record errors, not silent skips.
+
+### Request-model tightening (Phase 3)
+- `CampaignCreate` is `extra="forbid"`; unknown fields (e.g. inline `contact_ids`) now 422 instead of being silently ignored (`test_campaign_create_rejects_unknown_fields`).
+
+### Console generated client + postgres compose (Phase 2)
+- `npm run build` (tsc + vite) 0 errors after rewiring `api.ts` to generated paths/types.
+- `docker compose up -d --build` with a `postgres:16` service + healthcheck: orchestrator healthy with `VOXORA_STORAGE=postgres`; tenants + seeded contacts verified present in Postgres; ready/overview fetched through the nginx proxy; stack torn down (`docker compose down -v`).
+
+### Not done / unchanged (still honest)
+- No live Squid server, no live telephony, no real LLM, no browser E2E — all as above.

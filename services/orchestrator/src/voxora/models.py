@@ -71,6 +71,7 @@ class SuppressionCreate(BaseModel):
 
 
 class CampaignCreate(BaseModel):
+    model_config = {"extra": "forbid"}  # typos must fail loudly, not be ignored
     name: str = Field(min_length=1, max_length=160)
     agent_id: str
     crm_connection_id: Optional[str] = None

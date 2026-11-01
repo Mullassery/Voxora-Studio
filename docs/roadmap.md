@@ -7,21 +7,21 @@ Deliberately ordered so that every step ends in something runnable and testable.
 - [x] FastAPI orchestrator: campaigns, contacts, consent, suppression, calling windows, retries, mock telephony, audit.
 - [x] Squid-CRM adapter verified against verified client contracts (contact sync + webhooks).
 - [x] Operator console (React) building against the orchestrator API.
-- [x] Deterministic contract tests (59 Python tests), Rust voice-runtime tests (15), mypy + ruff clean.
+- [x] Deterministic contract tests, Rust voice-runtime tests, mypy + ruff clean (test counts below grew per milestone).
 - [x] Execute `docker compose up` end-to-end — both images built, health + contacts + full campaign lifecycle verified through the nginx proxy (see audit).
 
-## M1 — Make the simulation trustworthy at scale
+## M1 — Make the simulation trustworthy at scale (✅ 2026-11-01)
 
-- [ ] Postgres storage backend beside SQLite (same `Database` seam) with a storage-compat test suite.
-- [ ] Scheduling: campaign scheduling windows live in the worker loop (currently start-time only).
-- [ ] Campaign templates + seasonal timezones in the console.
-- [ ] OpenAPI snapshot + generated TypeScript client for the console (kill the hand-rolled `api.ts` DTOs).
+- [x] Postgres storage backend beside SQLite (same `Database` seam) with a storage-compat test suite (24 tests, parametrized over both backends; `psycopg` is a hard orchestrator dep).
+- [x] Scheduling: `Database.promote_due_campaigns()` flips scheduled→running in the worker loop when `schedule_at` arrives (audited as `campaign.due_promoted`).
+- [x] Campaign templates in the console (Welcome / Win-back / Reminder presets). *Still open: seasonal dialing-timezone presets.*
+- [x] OpenAPI-driven generated TypeScript client for the console (`services/orchestrator/scripts/generate_ts_client.py` → `apps/console/src/generated/`; response envelopes still hand-typed).
 
 ## M2 — Real CRM breadth (Squid first, then one more)
 
 - [ ] Live Squid instance integration test (needs an actual server; blocked on environment).
-- [ ] Suppression + consent sync for a CRM that exposes such objects; Squid stays honestly incapable of these.
-- [ ] Webhook replay testing harness (simulated out-of-order + duplicate delivery).
+- [x] Consent + suppression sync for a CRM that exposes such objects — capability-driven enrichment in `crm/sync.py` with contract tests (memory capable-adapter + Squid stays honestly incapable).
+- [x] Webhook replay testing harness: duplicate idempotence, tampered-replay rejection, no-resurrect-on-replay, last-accepted-out-of-order semantics (`tests/test_webhook_replay.py`).
 - [ ] Second CRM adapter (candidate: whatever exposes consent + suppression) to prove adapter portability.
 
 ## M3 — Real voice (the hard part)
@@ -34,7 +34,7 @@ Deliberately ordered so that every step ends in something runnable and testable.
 
 ## M4 — Production hygiene
 
-- [ ] Run CI on GitHub (workflow written; repo not pushed).
+- [x] Run CI on GitHub (green on `ubuntu-24.04` pinned Python job; runs 41192274198, 41259238748).
 - [ ] Multi-worker safety: SQLite locks become Postgres advisory locks; campaign claims move to `SELECT … FOR UPDATE SKIP LOCKED`.
 - [ ] Rate limiting + quota per tenant; token rotation endpoint; operator audit export.
 - [ ] Observability: Prometheus metrics endpoint next to the JSON logs; call latency dashboards off the existing `call_latency` data.

@@ -67,6 +67,17 @@ def test_agent_create_and_list(client) -> None:
     assert any(agent["name"] == "Support agent" for agent in data)
 
 
+def test_campaign_create_rejects_unknown_fields(client) -> None:
+    agent = client.post("/api/v1/agents", headers=AUTH, json={"name": "A"}).json()
+    bad = client.post(
+        "/api/v1/campaigns",
+        headers=AUTH,
+        json={"name": "C", "agent_id": agent["id"], "contact_ids": ["nope"]},
+    )
+    # Inline recipients are rejected loudly instead of silently ignored.
+    assert bad.status_code == 422
+
+
 def test_contact_create_validation_and_consent(client) -> None:
     bad = client.post("/api/v1/contacts", headers=AUTH, json={"phone": "123"})
     assert bad.status_code == 422
