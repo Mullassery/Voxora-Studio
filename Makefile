@@ -1,8 +1,10 @@
-.PHONY: install dev test lint typecheck web-install web-build rust-test verify
+.PHONY: install dev test lint typecheck web-install web-build rust-test ts-client verify
 install:
-	python3 -m venv .venv && .venv/bin/pip install -e "services/orchestrator[dev]"
+	python3 -m venv .venv && .venv/bin/pip install -e "services/orchestrator[dev,postgres]"
 dev:
 	PYTHONPATH=services/orchestrator/src .venv/bin/uvicorn voxora.api:app --reload --port 8000
+ts-client:
+	PYTHONPATH=services/orchestrator/src .venv/bin/python services/orchestrator/scripts/generate_ts_client.py
 test:
 	PYTHONPATH=services/orchestrator/src .venv/bin/pytest services/orchestrator/tests services/ai-runtime/tests -q
 lint:
