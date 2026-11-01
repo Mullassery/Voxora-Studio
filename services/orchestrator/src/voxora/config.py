@@ -139,8 +139,12 @@ class Settings:
             raise ValueError("VOXORA_SECRET_KEY must be at least 32 characters")
         if self.env == "production" and "development-only" in self.secret_key:
             raise ValueError("Refusing to start production with the development secret key")
-        if self.allow_live_calls and self.telephony_provider == "mock":
-            raise ValueError("VOXORA_ALLOW_LIVE_CALLS requires a non-mock telephony provider")
+        simulation_providers = {"mock", "voice-runtime"}
+        if self.allow_live_calls and self.telephony_provider in simulation_providers:
+            raise ValueError(
+                "VOXORA_ALLOW_LIVE_CALLS requires a real telephony provider; "
+                f"'{self.telephony_provider}' is simulation-only"
+            )
         for principal in self.api_tokens.values():
             if principal.role not in {"admin", "operator", "viewer"}:
                 raise ValueError("API token roles must be admin, operator, or viewer")

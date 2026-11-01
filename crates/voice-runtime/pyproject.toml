@@ -1,0 +1,26 @@
+# Python extension packaging for the Rust voice bridge (maturin).
+#
+#   pip install maturin
+#   make py-voice          (from the repo root)
+#
+# Produces the `voxora_voice_runtime` abi3 module (Python 3.9+).
+
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "voxora_voice_runtime"
+version = "0.1.0"
+description = "Voxora Studio voice bridge (Rust via PyO3) - scripted, simulation-only"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3.9",
+]
+
+[tool.maturin]
+locked = false
+features = ["pyo3-bindings"]
+# Only the lib is a python module; tests/ is not shipped.
+module-name = "voxora_voice_runtime"

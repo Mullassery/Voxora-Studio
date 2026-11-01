@@ -1,4 +1,4 @@
-.PHONY: install dev test lint typecheck web-install web-build rust-test ts-client verify
+.PHONY: install dev test lint typecheck web-install web-build rust-test py-voice ts-client verify
 install:
 	python3 -m venv .venv && .venv/bin/pip install -e "services/orchestrator[dev,postgres]"
 dev:
@@ -17,4 +17,7 @@ web-build:
 	cd apps/console && npm run build
 rust-test:
 	cargo test --workspace
+py-voice:
+	.venv/bin/pip install "maturin>=1.5,<2"
+	cd crates/voice-runtime && VIRTUAL_ENV="$(CURDIR)/.venv" ../../.venv/bin/maturin develop --release
 verify: lint typecheck test web-build rust-test

@@ -29,6 +29,12 @@ jobs:
       - name: Install
         run: |
           pip install fastapi==0.115.* uvicorn==0.32.* httpx==0.28.* pydantic==2.9.* "cryptography>=42" "psycopg[binary]==3.2.*" pytest==8.* ruff==0.17.* mypy==1.19.*
+      - name: Build voice bridge wheel (PyO3)
+        run: |
+          pip install "maturin>=1.5,<2"
+          cd crates/voice-runtime
+          maturin build --release
+          pip install target/wheels/*.whl
       - name: Ruff
         run: ruff check services
       - name: Mypy

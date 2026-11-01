@@ -156,3 +156,11 @@ $ PYTHONPATH=services/orchestrator/src:services/ai-runtime/src .venv/bin/python 
 
 ### Not done / unchanged (still honest)
 - No live Squid server, no live telephony, no real LLM, no browser E2E — all as above.
+
+### Voice-runtime <-> orchestrator seam (Phase 4, verified 2026-11-01)
+- Rust: `bridge.rs` gained a canonical JSON export (`summary_to_json`, `run_with_timing` per-turn timing) with golden tests (17 tests plain, 20 with `pyo3-bindings`); `pybridge.rs` exposes `run_scripted_call_json` via maturin (`pyproject.toml`, abi3 py39, feature-gated so plain `cargo test` never links `extension-module`).
+- Built for real: `maturin develop --release` installed `voxora_voice_runtime-0.1.0` into the venv; the seam test runs against the actual extension (no pretense).
+- Python: `telephony/voice_runtime.py` maps the JSON onto `TelephonyResult` (schema-version guarded with `ValueError`), adapter is idempotent per `idempotency_key`; `telephony_provider=voice-runtime` selects it via the registry; provider status reports it as `simulated: true`.
+- Config honesty maintained: `VOXORA_ALLOW_LIVE_CALLS` is rejected for BOTH `mock` and `voice-runtime` (both simulation providers).
+- Full suite: 110 Python tests green, ruff/mypy clean, cargo clean both feature states.
+- How to build locally: `make py-voice`. CI builds the wheel in the Python job before tests.
