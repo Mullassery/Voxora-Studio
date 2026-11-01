@@ -1,5 +1,42 @@
 import { useCallback, useEffect, useState } from "react";
-import { ApiError, Campaign, CallRow, ConsoleApi, ContactRow, Envelope } from "./api";
+import { AgentRow, ApiError, Campaign, CallRow, ConsoleApi, ContactRow, Envelope } from "./api";
+
+interface CampaignTemplate {
+  label: string;
+  name: string;
+  maxConcurrency: number;
+  maxAttempts: number;
+  retryBackoffSeconds: number;
+  description: string;
+}
+
+// Prefill presets; every campaign still defaults to dry run for safety.
+const TEMPLATES: CampaignTemplate[] = [
+  {
+    label: "Welcome outreach",
+    name: "Welcome calls",
+    maxConcurrency: 2,
+    maxAttempts: 2,
+    retryBackoffSeconds: 180,
+    description: "First-contact greet call, low touch.",
+  },
+  {
+    label: "Winback",
+    name: "Winback follow-ups",
+    maxConcurrency: 3,
+    maxAttempts: 3,
+    retryBackoffSeconds: 3600,
+    description: "Re-engage dormant contacts with retries.",
+  },
+  {
+    label: "Reminder",
+    name: "Appointment reminders",
+    maxConcurrency: 4,
+    maxAttempts: 1,
+    retryBackoffSeconds: 60,
+    description: "No retries; same-week reminders.",
+  },
+];
 
 type Tab = "overview" | "campaigns" | "contacts" | "calls";
 
@@ -117,8 +154,116 @@ function Overview({ summary, onRefresh }: { summary: string | null; onRefresh: (
   );
 }
 
+function CreateCampaign({
+  api,
+  busy,
+  setBusy,
+  onCreated,
+  onError,
+}: {
+  api: ConsoleApi;
+  busy: boolean;
+  setBusy: (busy: boolean) => void;
+  onCreated: () => void;
+  onError: (message: string | null) => void;
+}) {
+  const [templateIndex, setTemplateIndex] = useState(0);
+  const [agents, setAgents] = useState<AgentRow[]>([]);
+  const [agentId, setAgentId] = useState("");
+  const template = TEMPLATES[templateIndex];
+  const [name, setName] = useState(template.name);
+  const [maxConcurrency, setMaxConcurrency] = useState(template.maxConcurrency);
+  const [maxAttempts, setMaxAttempts] = useState(template.maxAttempts);
+  const [retryBackoff, setRetryBackoff] = useState(template.retryBackoffSeconds);
+  const [scheduleAt, setScheduleAt] = useState("");
+
+  const pickTemplate = (index: number) => {
+    setTemplateIndex(index);
+    const chosen = TEMPLATES[index];
+    setName(chosen.name);
+    setMaxConcurrency(chosen.maxConcurrency);
+    setMaxAttempts(chosen.maxAttempts);
+    setRetryBackoff(chosen.retryBackoffSeconds);
+  };
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const page = (await api.listAgents()) as Envelope<AgentRow[]>;
+        setAgents(page.data);
+        setAgentId(page.data[page.data.length - 1]?.id ?? "");
+      } catch {
+        onError("No agents available yet — create one from the orchestrator first.");
+      }
+    })();
+  }, [api, onError]);
+
+  const submit = async () => {
+    if (!agentId) {
+      onError("Select an agent.");
+      return;
+    }
+    setBusy(true);
+    try {
+      await api.createCampaign({
+        name: name.trim() || template.name,
+        agent_id: agentId,
+        dry_run: true,
+        max_concurrency: maxConcurrency,
+        max_attempts: maxAttempts,
+        retry_backoff_seconds: retryBackoff,
+        ...(scheduleAt ? { schedule_at: new Date(scheduleAt).toISOString() } : {}),
+      });
+      onError(null);
+      onCreated();
+    } catch (err) {
+      onError(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="create-campaign">
+      <label>Template</label>
+      <select value={templateIndex} onChange={(e) => pickTemplate(Number(e.target.value))}>
+        {TEMPLATES.map((t, index) => (
+          <option key={t.label} value={index}>
+            {t.label} — {t.description}
+          </option>
+        ))}
+      </select>
+      <label>Campaign name</label>
+      <input value={name} onChange={(e) => setName(e.target.value)} placeholder={template.name} />
+      <label>Agent</label>
+      <select value={agentId} onChange={(e) => setAgentId(e.target.value)}>
+        {!agents.length && <option value="">(no agents)</option>}
+        {agents.map((agent) => (
+          <option key={agent.id} value={agent.id}>
+            {agent.name}
+          </option>
+        ))}
+      </select>
+      <label>Max concurrency</label>
+      <input type="number" min={1} value={maxConcurrency} onChange={(e) => setMaxConcurrency(Number(e.target.value))} />
+      <label>Max attempts</label>
+      <input type="number" min={1} value={maxAttempts} onChange={(e) => setMaxAttempts(Number(e.target.value))} />
+      <label>Retry backoff (seconds)</label>
+      <input type="number" min={1} value={retryBackoff} onChange={(e) => setRetryBackoff(Number(e.target.value))} />
+      <label>Schedule for (empty = manual start)</label>
+      <input type="datetime-local" value={scheduleAt} onChange={(e) => setScheduleAt(e.target.value)} />
+      <button onClick={() => void submit()} disabled={busy}>
+        {busy ? "Creating…" : "Create dry-run campaign"}
+      </button>
+      <p className="muted">New campaigns always start as dry run; recipients are added after creation.</p>
+    </div>
+  );
+}
+
 function Campaigns({ api, onError }: { api: ConsoleApi; onError: (message: string | null) => void }) {
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
+  const [showCreate, setShowCreate] = useState(false);
+  const [creating, setCreating] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -143,9 +288,16 @@ function Campaigns({ api, onError }: { api: ConsoleApi; onError: (message: strin
     }
   };
 
+  const created = useCallback(() => {
+    setShowCreate(false);
+    void load();
+  }, [load]);
+
   return (
     <section>
       <button onClick={() => void load()}>Refresh</button>
+      <button onClick={() => setShowCreate(!showCreate)}>New campaign</button>
+      {showCreate && <CreateCampaign api={api} busy={creating} setBusy={setCreating} onCreated={created} onError={onError} />}
       <table>
         <thead>
           <tr>

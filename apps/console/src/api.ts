@@ -107,6 +107,10 @@ export class ConsoleApi {
     return this.request(PATH_Agents, { method: "POST", body: values });
   }
 
+  listAgents(): Promise<Envelope<AgentRow[]>> {
+    return this.request(`${PATH_Agents}?limit=20`);
+  }
+
   campaigns(): Promise<Envelope<CampaignRow[]>> {
     return this.request(`${PATH_Campaigns}?limit=50`);
   }
@@ -208,6 +212,13 @@ export interface Campaign {
 
 export interface CampaignRow extends Campaign {
   agentId: string;
+}
+
+export interface AgentRow {
+  id: string;
+  name: string;
+  systemPrompt: string;
+  model: string;
 }
 
 export interface ContactRow {
