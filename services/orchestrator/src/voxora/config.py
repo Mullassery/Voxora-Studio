@@ -71,6 +71,8 @@ class Settings:
     twilio_account_sid: Optional[str] = None
     twilio_auth_token: Optional[str] = None
     twilio_from_number: Optional[str] = None
+    twilio_twiml_url: Optional[str] = None
+    twilio_status_callback_url: Optional[str] = None
     max_campaign_recipients: int = 10000
     max_import_pages: int = 20
     log_level: str = "INFO"
@@ -119,6 +121,8 @@ class Settings:
             twilio_account_sid=os.getenv("TWILIO_ACCOUNT_SID") or None,
             twilio_auth_token=os.getenv("TWILIO_AUTH_TOKEN") or None,
             twilio_from_number=os.getenv("TWILIO_FROM_NUMBER") or None,
+            twilio_twiml_url=os.getenv("TWILIO_TWIML_URL") or None,
+            twilio_status_callback_url=os.getenv("TWILIO_STATUS_CALLBACK_URL") or None,
             max_campaign_recipients=_int(os.getenv("VOXORA_MAX_CAMPAIGN_RECIPIENTS"), 10000),
             max_import_pages=_int(os.getenv("VOXORA_MAX_IMPORT_PAGES"), 20),
             log_level=os.getenv("VOXORA_LOG_LEVEL", "INFO"),
@@ -139,6 +143,22 @@ class Settings:
             raise ValueError("VOXORA_SECRET_KEY must be at least 32 characters")
         if self.env == "production" and "development-only" in self.secret_key:
             raise ValueError("Refusing to start production with the development secret key")
+        if self.telephony_provider == "twilio":
+            missing = [
+                name
+                for name, value in {
+                    "TWILIO_ACCOUNT_SID": self.twilio_account_sid,
+                    "TWILIO_AUTH_TOKEN": self.twilio_auth_token,
+                    "TWILIO_FROM_NUMBER": self.twilio_from_number,
+                    "TWILIO_TWIML_URL": self.twilio_twiml_url,
+                    "TWILIO_STATUS_CALLBACK_URL": self.twilio_status_callback_url,
+                }.items()
+                if not value
+            ]
+            if missing:
+                raise ValueError(
+                    "VOXORA_TELEPHONY_PROVIDER=twilio requires: " + ", ".join(missing)
+                )
         simulation_providers = {"mock", "voice-runtime"}
         if self.allow_live_calls and self.telephony_provider in simulation_providers:
             raise ValueError(

@@ -10,7 +10,7 @@ test:
 lint:
 	.venv/bin/ruff check services/orchestrator services/ai-runtime
 typecheck:
-	PYTHONPATH=services/orchestrator/src .venv/bin/mypy services/orchestrator/src/voxora
+	PYTHONPATH=services/orchestrator/src .venv/bin/mypy --config-file services/orchestrator/pyproject.toml services/orchestrator/src/voxora
 web-install:
 	cd apps/console && npm install
 web-build:

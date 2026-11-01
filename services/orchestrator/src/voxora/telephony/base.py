@@ -36,6 +36,10 @@ class TelephonyResult:
     disposition: str
     simulated: bool
     retryable: bool = False
+    # Providers that dial asynchronously (Twilio) return final=False and are
+    # settled later by a status callback; synchronous providers (mock,
+    # scripted, voice-runtime) stay final=True.
+    final: bool = True
     duration_ms: int = 0
     error_code: Optional[str] = None
     error_message: Optional[str] = None

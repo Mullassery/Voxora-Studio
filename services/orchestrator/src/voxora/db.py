@@ -1023,6 +1023,15 @@ class Database:
             ).fetchone()
         return self._decode(row) if row else None
 
+    def get_call_by_provider_call_id(self, provider_call_id: str) -> Optional[Dict[str, Any]]:
+        """Provider callbacks carry only their SID; lookup unconditionally."""
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT * FROM calls WHERE provider=? AND provider_call_id=?",
+                ("twilio", provider_call_id),
+            ).fetchone()
+        return self._decode(row) if row else None
+
     def update_call(
         self, tenant_id: str, call_id: str, target: Optional[str] = None, **fields: Any
     ) -> Optional[Dict[str, Any]]:

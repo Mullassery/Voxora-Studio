@@ -191,6 +191,16 @@ class CampaignEngine:
         attempt = int(item["attempts"])
         for event in result.events:
             self.db.add_call_event(tenant_id, call_id, event.event_type, event.at, event.data)
+        if not getattr(result, "final", True):
+            # Async provider (Twilio): the call stays in flight and is settled
+            # later by settle_provider_call() when the status callback arrives.
+            self.db.update_call(
+                tenant_id,
+                call_id,
+                provider=result.provider,
+                provider_call_id=result.provider_call_id,
+            )
+            return
         for stage, duration in result.latency_ms.items():
             self.db.add_latency(tenant_id, call_id, stage, duration, result.simulated)
 
@@ -238,6 +248,48 @@ class CampaignEngine:
                 last_error=result.disposition,
                 eligibility_code=decision_code(result.disposition),
             )
+
+    # --------------------------------------------------------------- settle
+    def settle_provider_call(self, provider_call_id: str, result: Any) -> Optional[str]:
+        """Terminal status callback for an async provider (Twilio).
+
+        Reconstructs the engine context from the call row and applies the same
+        state machine as a synchronous result. Duplicate callbacks are
+        absorbed idempotently; calls that exist without an in-flight state
+        are rejected honestly.
+        """
+        call = self.db.get_call_by_provider_call_id(provider_call_id)
+        if call is None:
+            return "unknown_call"
+        tenant_id = call["tenant_id"]
+        if call["status"] not in {"dialing", "ringing", "in_progress"}:
+            return "duplicate"
+        campaign = self.db.get_campaign(tenant_id, call["campaign_id"])
+        if campaign is None:
+            return "unknown_campaign"
+        self._apply_result(
+            {
+                "id": call["recipient_id"],
+                "call_id": call["id"],
+                "contact_id": call["contact_id"],
+                "attempts": call["attempt"],
+                "idempotency_key": call["idempotency_key"],
+            },
+            campaign,
+            {},  # callbacks arrive post-dial; no per-record eligibility re-check
+            result,
+        )
+        if campaign["status"] == "running":
+            self.db.complete_campaign_if_done(tenant_id, campaign["id"])
+        self.db.audit(
+            tenant_id,
+            "twilio-webhook",
+            "call.settled",
+            "call",
+            call["id"],
+            {"callSid": provider_call_id, "status": result.status},
+        )
+        return "settled"
 
     def _handle_ineligible(
         self,

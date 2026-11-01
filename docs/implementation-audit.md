@@ -164,3 +164,10 @@ $ PYTHONPATH=services/orchestrator/src:services/ai-runtime/src .venv/bin/python 
 - Config honesty maintained: `VOXORA_ALLOW_LIVE_CALLS` is rejected for BOTH `mock` and `voice-runtime` (both simulation providers).
 - Full suite: 110 Python tests green, ruff/mypy clean, cargo clean both feature states.
 - How to build locally: `make py-voice`. CI builds the wheel in the Python job before tests.
+
+### Twilio telephony adapter (Phase 5, verified 2026-11-01)
+- Implemented against Twilio's **documented** REST contract (documented: Calls.json via Basic auth, `.json` resource suffix, `StatusCallbackEvent`, `X-Twilio-Signature` HMAC-SHA1): `telephony/twilio.py` + 14 contract tests (fake transport; request shapes, idempotency, 429 Retry-After, cancel, dry-run provider isolation, callback map).
+- Async settlement: `TelephonyResult.final` extended; pending results leave the call in-flight; `settle_provider_call()` applies terminal callbacks through the same state machine, absorbs duplicates, and fails honestly on unknown SIDs. Webhook endpoints verify signatures (`403` on tamper), `503` when Twilio is not the configured provider, `404` for unknown CallSid (tested through the HTTP layer: 5 tests).
+- **Honest boundary:** no live-server verification — no Twilio credentials in this environment; dialing additionally requires `VOXORA_ALLOW_LIVE_CALLS=true` (refused otherwise, tested). Provider status reports Twilio `implemented: true, configured: false, live: false` in the default dev setup.
+- Config: `VOXORA_TELEPHONY_PROVIDER=twilio` now requires all of `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`, `TWILIO_TWIML_URL`, `TWILIO_STATUS_CALLBACK_URL` (validated at startup).
+- Suite: 129 Python tests green (both storage backends), ruff + mypy clean, Rust 17 green.

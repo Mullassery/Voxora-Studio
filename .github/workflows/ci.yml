@@ -37,7 +37,7 @@ jobs:
       - name: Ruff
         run: ruff check services
       - name: Mypy
-        run: mypy services/orchestrator/src services/ai-runtime/src
+        run: mypy --config-file services/orchestrator/pyproject.toml services/orchestrator/src services/ai-runtime/src
         env:
           MYPYPATH: ${{ github.workspace }}/services/orchestrator/src
       - name: Tests (orchestrator, SQLite + Postgres)

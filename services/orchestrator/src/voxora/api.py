@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, List, Optional
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from . import __version__
 from .campaign import CampaignEngine, CampaignError
@@ -161,6 +161,21 @@ def create_app_from_env() -> "FastAPI":
         )
     configure_logging(settings.log_level)
     return create_app(settings)
+
+
+def _urlencoded(raw: bytes) -> Dict[str, str]:
+    import urllib.parse
+
+    return {key: value for key, value in urllib.parse.parse_qsl(raw.decode("utf-8"), keep_blank_values=True)}
+
+
+def _twiml_text(agent: Dict[str, Any], call: Dict[str, Any]) -> str:
+    prompt = (agent or {}).get("system_prompt") or ""
+    prompt = prompt.strip().replace("\n", " ")
+    if not prompt:
+        name = str((call or {}).get("id") or "").strip()
+        prompt = f"Hello, this is a simulated Voxora outbound call ({name}). Goodbye."
+    return prompt[:400]
 
 
 def create_app(
@@ -749,6 +764,68 @@ def create_app(
             logger.exception("webhook processing failed")
             outcome = {"status": "failed", "reason": str(error)}
         return JSONResponse(status_code=200, content=outcome)
+
+    # ------------------------------------------------------------ twilio webhooks
+    # Twilio calls these endpoints server-to-server: no API token, no tenant
+    # principal (the callback carries none). Both verify X-Twilio-Signature
+    # with the configured auth token; a missing/unconfigured token is an
+    # honest 503, not a silent pass.
+
+    @app.post("/api/v1/telephony/twilio/status")
+    async def twilio_status_callback(request: Request) -> Response:
+        settings = request.app.state.settings
+        auth_token = settings.twilio_auth_token
+        if settings.telephony_provider != "twilio" or not auth_token:
+            raise HTTPException(status_code=503, detail=_error_body("twilio_not_configured", "Twilio callbacks require TWILIO_AUTH_TOKEN"))
+        form = _urlencoded(await request.body())
+        from .security import verify_twilio_signature
+
+        if not verify_twilio_signature(auth_token, str(request.url), form, request.headers.get("x-twilio-signature")):
+            raise HTTPException(status_code=403, detail=_error_body("invalid_signature", "Twilio signature verification failed"))
+        call_sid = form.get("CallSid") or ""
+        if not call_sid:
+            raise HTTPException(status_code=400, detail=_error_body("missing_call_sid", "CallSid is required"))
+        call = request.app.state.db.get_call_by_provider_call_id(call_sid)
+        if call is None:
+            raise HTTPException(status_code=404, detail=_error_body("call_not_found", "No call matches CallSid"))
+        from datetime import datetime, timezone
+
+        adapter = request.app.state.telephony
+        try:
+            result = adapter.callback_result(form, received_at=datetime.now(timezone.utc).isoformat())
+        except Exception as error:  # noqa: BLE001 - malformed provider data is data
+            raise HTTPException(status_code=400, detail=_error_body("invalid_callback", str(error))) from error
+        outcome = request.app.state.engine.settle_provider_call(call_sid, result)
+        if outcome == "unknown_call":
+            raise HTTPException(status_code=404, detail=_error_body("call_not_found", "No call matches CallSid"))
+        return Response(content="<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response/>", media_type="application/xml")
+
+    @app.post("/api/v1/telephony/twilio/twiml/{call_id}")
+    async def twilio_twiml(call_id: str, request: Request) -> Response:
+        settings = request.app.state.settings
+        auth_token = settings.twilio_auth_token
+        if settings.telephony_provider != "twilio" or not auth_token:
+            raise HTTPException(status_code=503, detail=_error_body("twilio_not_configured", "Twilio TwiML requires TWILIO_AUTH_TOKEN"))
+        form = _urlencoded(await request.body())
+        from .security import verify_twilio_signature
+
+        if not verify_twilio_signature(auth_token, str(request.url), form, request.headers.get("x-twilio-signature")):
+            raise HTTPException(status_code=403, detail=_error_body("invalid_signature", "Twilio signature verification failed"))
+        db = request.app.state.db
+        call = db.get_call_by_provider_call_id(call_id)
+        if call is None:
+            raise HTTPException(status_code=404, detail=_error_body("call_not_found", "No call matches CallSid"))
+        campaign = db.get_campaign(call["tenant_id"], call["campaign_id"])
+        agent = db.get_agent(call["tenant_id"], (campaign or {}).get("agent_id", "")) if campaign else None
+        text = _twiml_text(agent or {}, call)
+        escaped = (text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+        xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            "<Response><Say voice=\"Alice\">"
+            + escaped
+            + "</Say><Hangup/></Response>"
+        )
+        return Response(content=xml, media_type="application/xml")
 
     # ----------------------------------------------------------------- audit
     @app.get("/api/v1/audit")

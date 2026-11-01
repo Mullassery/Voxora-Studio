@@ -28,7 +28,7 @@ Deliberately ordered so that every step ends in something runnable and testable.
 
 - [x] Wire `crates/voice-runtime` to the orchestrator: PyO3 extension `voxora_voice_runtime` (`make py-voice`) exposes the scripted bridge JSON; `VoiceRuntimeTelephonyAdapter` maps it onto `TelephonyResult` (simulation-only; seam tested with the real module). *Still open: real media transport in the bridge itself.*
 - [ ] Real media backend choice: SIP/RTP gateway via provider SDK, or platform WebSocket media (e.g. provider media streams). Decision gate: legal + carrier compliance review first.
-- [ ] Twilio (or equivalent) adapter implemented and tested against sandbox numbers only; `allow_live_calls` flips only with `TELEPHONY_PROVIDER != mock` and an explicit operator acknowledgment (per-call confirmation flag, not just env var).
+- [x] Twilio adapter implemented against the documented REST contract with fake-transport tests; async settlement wired through signed webhooks. *Still open: live-server verification (needs credentials).* `allow_live_calls` flips only with a real provider configured and an explicit operator env flag.
 - [ ] Streaming audio pipeline in the voice-runtime (jitter buffer, barge-in VAD) — the turn-taking machine is already written and tested for this.
 - [ ] Real STT/TTS integration contract in `ai-runtime` (replace `real_llm: False` with a pluggable LLM client; scripted agent stays as the test default).
 

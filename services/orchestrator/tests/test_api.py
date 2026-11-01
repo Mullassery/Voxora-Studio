@@ -224,10 +224,14 @@ def test_unsupported_provider_rejected(client) -> None:
 def test_telephony_providers_tell_the_truth(client) -> None:
     body = client.get("/api/v1/telephony/providers", headers=AUTH).json()
     ids = [provider["id"] for provider in body["data"]]
-    assert "mock" in ids
+    assert ids[:3] == ["mock", "voice-runtime", "twilio"]
+    for provider in body["data"]:
+        if provider["id"] in {"mock", "voice-runtime"}:
+            assert provider["implemented"] is True and provider["simulated"] is True
     twilio = next(provider for provider in body["data"] if provider["id"] == "twilio")
-    assert twilio["implemented"] is False
-    assert twilio["configured"] is False
+    # Implemented, but not configured (no credentials in test settings).
+    assert twilio["implemented"] is True
+    assert twilio["configured"] is False and twilio["live"] is False
 
 
 def test_sync_uses_adapter_and_imports_contacts(client) -> None:

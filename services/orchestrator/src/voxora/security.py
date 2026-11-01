@@ -115,3 +115,18 @@ def parse_squid_webhook(
     if not payload_event_id or not payload_event_type:
         return VerifiedWebhook(False, event_id, event_type, None, "missing_event_identity")
     return VerifiedWebhook(True, payload_event_id, payload_event_type, payload)
+
+
+def twilio_signature(auth_token: str, url: str, params: Dict[str, str]) -> str:
+    """X-Twilio-Signature as documented: Base64(HMAC-SHA1(url + sorted params))."""
+    items = "".join(f"{key}{value}" for key, value in sorted(params.items()))
+    payload = (url + items).encode("utf-8")
+    return base64.b64encode(hmac.new(auth_token.encode("utf-8"), payload, hashlib.sha1).digest()).decode("ascii")
+
+
+def verify_twilio_signature(
+    auth_token: str, url: str, params: Dict[str, str], header: Optional[str]
+) -> bool:
+    if not header:
+        return False
+    return safe_equal(twilio_signature(auth_token, url, params), header)
