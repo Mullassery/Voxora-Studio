@@ -1,13 +1,12 @@
 # Voxora Studio
 
 Open-source AI voice telephony + outbound campaign platform: a FastAPI
-control plane for consented calling, a deterministic Rust voice bridge, a
-Squid-CRM adapter, and an operator console.
+control plane for consented outbound calling, a deterministic Rust voice
+bridge (via PyO3), a Squid-CRM adapter, and an operator console.
 
-**Current state: simulation-only.** Every call is deterministic and flagged
-`simulated: true`. There is no code path that can dial a real phone number:
-live calls are disabled by default and config validation refuses to enable
-live calls while a simulation provider is selected.
+Simulation-only by design: every call is deterministic and flagged
+`simulated: true`, and config validation refuses live calls while a
+simulation provider is selected.
 
 ## What works today
 
