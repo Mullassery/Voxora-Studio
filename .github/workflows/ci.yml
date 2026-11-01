@@ -32,8 +32,7 @@ jobs:
       - name: Build voice bridge wheel (PyO3)
         run: |
           pip install "maturin>=1.5,<2"
-          cd crates/voice-runtime
-          maturin build --release
+          (cd crates/voice-runtime && maturin build --release)
           pip install target/wheels/*.whl
       - name: Ruff
         run: ruff check services
