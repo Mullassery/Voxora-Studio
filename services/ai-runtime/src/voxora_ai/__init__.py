@@ -6,7 +6,8 @@ capabilities) and a fully working mock implementation. No real LLM client is
 implemented; ``capabilities`` lists what is actually implemented.
 """
 
-from .engine import AgentReply, AgentTurnError, MockAgent
+from .engine import AgentBrain, AgentReply, AgentTurnError, MockAgent
+from .openrouter import OpenRouterAgent, OpenRouterError, create_agent_from_env
 
 __all__ = ["AgentReply", "AgentTurnError", "MockAgent", "__version__"]
 

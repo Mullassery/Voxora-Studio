@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Dict, List, Optional, Protocol, runtime_checkable
 
 _END_KEYWORDS = ("goodbye", "bye", "stop calling", "end call")
 _CLOSING = "Understood. Ending the simulated call now. Goodbye."
@@ -17,6 +17,27 @@ _CLOSING = "Understood. Ending the simulated call now. Goodbye."
 
 class AgentTurnError(Exception):
     """The backend was used incorrectly (out-of-order calls)."""
+
+
+@runtime_checkable
+class AgentBrain(Protocol):
+    """Optional conversation-policy hook, for downstream products.
+
+    Voxora owns the call lifecycle and (when configured) the model call; a
+    brain may take over per-turn wording or end-call decisions. Returning
+    ``None`` hands the turn back to Voxora's default phrasing. Implementing
+    this does not create any Voxora dependency in the brain."""
+
+    def respond(self, user_text: str, history: List[Dict[str, str]]) -> Optional["AgentReply"]:
+        """Return the next agent turn, or ``None`` to defer to the engine."""
+        ...
+
+
+def turn_from_reply(reply: Optional[AgentReply], fallback_reply: AgentReply) -> AgentReply:
+    """Prefer the brain's turn (including its explicit end_call), else the engine's."""
+    if reply is None or (not reply.text.strip() and not reply.ended):
+        return fallback_reply
+    return reply
 
 
 @dataclass(frozen=True)
