@@ -68,6 +68,7 @@ class Settings:
     worker_threads: int = 4
     global_concurrency: int = 5
     telephony_provider: str = "mock"
+    llm_provider: str = "mock"
     allow_live_calls: bool = False
     twilio_account_sid: Optional[str] = None
     twilio_auth_token: Optional[str] = None
@@ -122,6 +123,7 @@ class Settings:
             worker_threads=_int(os.getenv("VOXORA_WORKER_THREADS"), 4),
             global_concurrency=_int(os.getenv("VOXORA_GLOBAL_CONCURRENCY"), 5),
             telephony_provider=os.getenv("VOXORA_TELEPHONY_PROVIDER", "mock"),
+            llm_provider=os.getenv("VOXORA_LLM_PROVIDER", "mock"),
             allow_live_calls=_bool(os.getenv("VOXORA_ALLOW_LIVE_CALLS"), False),
             twilio_account_sid=os.getenv("TWILIO_ACCOUNT_SID") or None,
             twilio_auth_token=os.getenv("TWILIO_AUTH_TOKEN") or None,

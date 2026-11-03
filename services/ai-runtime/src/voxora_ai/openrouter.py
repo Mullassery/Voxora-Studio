@@ -334,3 +334,150 @@ def create_agent_from_env(env: Optional[Dict[str, str]] = None) -> Any:
     raise ValueError(
         f"Unknown VOXORA_LLM_PROVIDER '{selection}'; expected 'mock' or 'openrouter'"
     )
+
+
+class OpenRouterLLM:
+    """Stateless model-decision router (no conversation lifecycle).
+
+    Used by the '/api/v1/ai/decide' endpoint: downstream applications keep
+    their interview/methodology logic; Voxora hosts the key, chooses the
+    model, and records usage honestly. Same retryable map and billing
+    capture as OpenRouterAgent.
+    """
+
+    provider = "openrouter"
+
+    def __init__(
+        self,
+        *,
+        api_key: Optional[str] = None,
+        model: Optional[str] = None,
+        base_url: Optional[str] = None,
+        timeout: Optional[float] = None,
+        max_retries: Optional[int] = None,
+        retry_base_delay: float = 0.25,
+        site_url: Optional[str] = None,
+        app_name: Optional[str] = None,
+        client: Any = None,
+    ) -> None:
+        if httpx is None:
+            raise OpenRouterError("httpx is required for the openrouter provider")
+        self.api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
+        self.model = model or os.environ.get("OPENROUTER_MODEL")
+        if not self.api_key:
+            raise ValueError("OPENROUTER_API_KEY is required for the openrouter provider")
+        if not self.model:
+            raise ValueError("OPENROUTER_MODEL is required; set the exact OpenRouter model id")
+        self.base_url = (
+            base_url or os.environ.get("OPENROUTER_BASE_URL", DEFAULT_BASE_URL)
+        ).rstrip("/")
+        self.timeout = timeout if timeout is not None else float(
+            os.environ.get("OPENROUTER_TIMEOUT_SECONDS", "60")
+        )
+        self.max_retries = max_retries if max_retries is not None else _env_int(
+            "OPENROUTER_MAX_RETRIES", 1
+        )
+        self.retry_base_delay = retry_base_delay
+        self._site_url = site_url or os.environ.get("OPENROUTER_SITE_URL")
+        self._app_name = app_name or os.environ.get("OPENROUTER_APP_NAME", "Voxora Studio")
+        self._client = client if client is not None else httpx.AsyncClient(
+            base_url=self.base_url, timeout=self.timeout
+        )
+        self._tokens = {"prompt": 0, "completion": 0, "total": 0}
+        self._cost_usd = 0.0
+        self._lock = threading.Lock()
+
+    def usage_report(self) -> Dict[str, float]:
+        with self._lock:
+            return {
+                "prompt_tokens": float(self._tokens["prompt"]),
+                "completion_tokens": float(self._tokens["completion"]),
+                "total_tokens": float(self._tokens["total"]),
+                "cost_usd": self._cost_usd,
+            }
+
+    def _record_usage(self, usage: Dict[str, Any]) -> None:
+        with self._lock:
+            self._tokens["prompt"] += int(usage.get("prompt_tokens") or 0)
+            self._tokens["completion"] += int(usage.get("completion_tokens") or 0)
+            self._tokens["total"] += int(usage.get("total_tokens") or 0)
+            try:
+                cost = usage.get("cost")
+                self._cost_usd += float(cost) if cost is not None else 0.0
+            except (TypeError, ValueError):
+                pass
+
+    def decide(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        response_format: str = "json_object",
+        temperature: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """One-shot decision: returns the parsed JSON object the model produced."""
+        import time
+
+        payload: Dict[str, Any] = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "usage": {"include": True},
+        }
+        if temperature is not None:
+            payload["temperature"] = temperature
+        if response_format == "json_object":
+            payload["response_format"] = {"type": "json_object"}
+        headers: Dict[str, str] = {"Authorization": f"Bearer {self.api_key}"}
+        if self._app_name:
+            headers["X-Title"] = self._app_name
+        if self._site_url:
+            headers["HTTP-Referer"] = self._site_url
+        last_error = "OpenRouter request failed"
+        for attempt in range(self.max_retries + 1):
+            try:
+                response = self._client.post("/chat/completions", json=payload, headers=headers)
+            except Exception as error:
+                last_error = f"transport_failure: {type(error).__name__}: {error}"[:300]
+                if attempt < self.max_retries:
+                    time.sleep(self.retry_base_delay * (2**attempt))
+                    continue
+                raise OpenRouterError(last_error, retryable=True) from error
+            if response.status_code in _RETRYABLE_STATUS:
+                retry_after = response.headers.get("retry-after")
+                try:
+                    wait = float(retry_after) if retry_after else None
+                except (TypeError, ValueError):
+                    wait = None
+                if attempt < self.max_retries:
+                    time.sleep(wait or (self.retry_base_delay * (2**attempt)))
+                    continue
+                raise OpenRouterError(
+                    f"openrouter_http_{response.status_code}", retryable=True
+                )
+            if response.status_code != 200:
+                raise OpenRouterError(
+                    f"openrouter_http_{response.status_code}",
+                    retryable=response.status_code in _RETRYABLE_STATUS,
+                )
+            try:
+                body = response.json()
+                message = body["choices"][0]["message"]["content"]
+                self._record_usage(body.get("usage") or {})
+            except (KeyError, IndexError, TypeError) as error:
+                raise OpenRouterError(
+                    f"invalid model response: {error}", retryable=False
+                ) from error
+            stripped = _strip_json(message if isinstance(message, str) else "")
+            try:
+                data = json.loads(stripped)
+            except json.JSONDecodeError:
+                raise OpenRouterError(
+                    f"model returned non-JSON output: {stripped[:80]!r}", retryable=False
+                ) from error
+            if not isinstance(data, dict):
+                raise OpenRouterError("model JSON output is not an object", retryable=False)
+            return data
+        raise OpenRouterError(last_error, retryable=True)

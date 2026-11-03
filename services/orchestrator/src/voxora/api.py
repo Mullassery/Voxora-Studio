@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import uuid
 from contextlib import asynccontextmanager
@@ -21,6 +22,7 @@ from .crm.sync import sync_connection
 from .db import Database, database_from_settings, iso
 from .models import (
     AgentCreate,
+    AiDecideRequest,
     AudienceImport,
     CampaignCreate,
     CampaignSyncRequest,
@@ -86,6 +88,25 @@ def _page(items: List[Dict[str, Any]], total: int, limit: int, offset: int) -> D
 
 def now_iso() -> str:
     return iso()
+
+
+_MOCK_DECISION_FALLBACK = {
+    "next_action": "probe",
+    "question_text": "Could you tell me a bit more about that?",
+    "is_complete": False,
+    "evidence_updates": [],
+}
+
+
+def _mock_llm_decision(system_prompt: str, user_prompt: str) -> Dict[str, Any]:
+    """Deterministic development decision; declared as mock in the response."""
+    digest = hashlib.sha256(f"{system_prompt}:{user_prompt}".encode("utf-8")).digest()
+    action = ("probe", "clarify", "challenge", "move_on", "conclude")[digest[0] % 5]
+    return {
+        **_MOCK_DECISION_FALLBACK,
+        "next_action": action,
+        "is_complete": action == "conclude",
+    }
 
 
 _VOICE_SESSION_TERMINAL = {"completed", "busy", "no_answer", "failed", "terminated", "canceled"}
@@ -983,6 +1004,58 @@ def create_app(
         app.state.db.add_call_event(principal.tenant_id, call_id, "canceled", now_iso(), {"actor": principal.name})
         app.state.db.audit(principal.tenant_id, principal.name, "call.canceled", "call", call_id)
         return app.state.db.get_call_detail(principal.tenant_id, call_id)
+
+    # -------------------------------------------------------- AI model router
+    @app.post("/api/v1/ai/decide")
+    def ai_decide(
+        payload: AiDecideRequest,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        """One-shot model decision through Voxora's LLM router.
+
+        The calling application keeps its methodology; Voxora owns the
+        OpenRouter key, model selection, routing, and usage/billing capture
+        (honest zeros when the provider supplies no cost). 501 when the
+        configured provider cannot serve text decisions.
+        """
+        _require_writer(principal)
+        settings: Settings = app.state.settings
+        if settings.llm_provider == "openrouter":
+            from voxora_ai.openrouter import OpenRouterError, OpenRouterLLM
+
+            try:
+                llm = OpenRouterLLM()
+                decision = llm.decide(payload.system_prompt, payload.user_prompt)
+            except ValueError as error:
+                raise ApiError(501, str(error), "llm_provider_unconfigured") from None
+            except OpenRouterError as error:
+                raise ApiError(503, str(error), "llm_unavailable") from None
+        else:
+            llm = None
+            decision = _mock_llm_decision(payload.system_prompt, payload.user_prompt)
+        app.state.db.audit(
+            principal.tenant_id,
+            principal.name,
+            "ai.decide",
+            "llm",
+            None,
+            {
+                "provider": settings.llm_provider,
+                "model_profile": payload.model_profile,
+                "source": "voxora" if llm is not None else "mock-llm",
+            },
+        )
+        response: Dict[str, Any] = {
+            "decision": decision,
+            "source": "openrouter" if llm is not None else "mock-llm",
+            "recorded_usage": llm.usage_report() if llm is not None else {
+                "prompt_tokens": 0.0,
+                "completion_tokens": 0.0,
+                "total_tokens": 0.0,
+                "cost_usd": 0.0,
+            },
+        }
+        return response
 
     # -------------------------------------------------------- telephony info
     @app.get("/api/v1/telephony/providers")

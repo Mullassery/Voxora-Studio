@@ -114,6 +114,15 @@ class SessionInstruction(BaseModel):
     priority: str = Field(default="normal", max_length=20)
 
 
+class AiDecideRequest(BaseModel):
+    """One-shot model decision via Voxora's router (ADR-3D-LLM)."""
+
+    model_config = {"extra": "forbid"}
+    system_prompt: str = Field(min_length=1, max_length=20000)
+    user_prompt: str = Field(min_length=1, max_length=30000)
+    model_profile: Optional[str] = Field(default=None, max_length=120)
+
+
 class CampaignCreate(BaseModel):
     model_config = {"extra": "forbid"}  # typos must fail loudly, not be ignored
     name: str = Field(min_length=1, max_length=160)
