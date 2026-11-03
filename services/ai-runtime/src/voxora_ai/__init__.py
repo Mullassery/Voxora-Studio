@@ -9,6 +9,15 @@ implemented; ``capabilities`` lists what is actually implemented.
 from .engine import AgentBrain, AgentReply, AgentTurnError, MockAgent
 from .openrouter import OpenRouterAgent, OpenRouterError, create_agent_from_env
 
-__all__ = ["AgentReply", "AgentTurnError", "MockAgent", "__version__"]
+__all__ = [
+    "AgentBrain",
+    "AgentReply",
+    "AgentTurnError",
+    "MockAgent",
+    "OpenRouterAgent",
+    "OpenRouterError",
+    "__version__",
+    "create_agent_from_env",
+]
 
 __version__ = "0.1.0"

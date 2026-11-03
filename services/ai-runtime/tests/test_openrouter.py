@@ -8,7 +8,6 @@ the OpenRouter usage/billing fields (`usage.include` => per-call `cost`).
 from __future__ import annotations
 
 import json
-import sys
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -22,10 +21,9 @@ try:
 except ImportError:  # pragma: no cover
     pytest.skip("httpx not installed", allow_module_level=True)
 
-from voxora_ai.openrouter import (
+from voxora_ai.openrouter import (  # noqa: E402 - below guarded pytest.skip
     DEFAULT_BASE_URL,
     OpenRouterAgent,
-    OpenRouterError,
     create_agent_from_env,
 )
 

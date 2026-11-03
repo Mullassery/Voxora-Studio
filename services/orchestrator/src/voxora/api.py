@@ -21,6 +21,7 @@ from .crm.sync import sync_connection
 from .db import Database, database_from_settings, iso
 from .models import (
     AgentCreate,
+    AudienceImport,
     CampaignCreate,
     CampaignSyncRequest,
     ConsentUpdate,
@@ -386,6 +387,103 @@ def create_app(
             return app.state.engine.validate_recipients(principal.tenant_id, campaign_id)
         except KeyError:
             raise ApiError(404, "Campaign not found", "campaign_not_found") from None
+
+    @app.post("/api/v1/campaigns/import-audience", status_code=201)
+    def import_audience(
+        payload: AudienceImport,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        """Import a CRM audience as a new campaign (idempotent, fail-closed consent)."""
+        _require_writer(principal)
+        if not app.state.db.get_agent(principal.tenant_id, payload.agent_id):
+            raise ApiError(404, "Agent not found", "agent_not_found")
+        campaign = app.state.db.create_campaign(
+            principal.tenant_id,
+            {
+                "name": payload.campaign_name,
+                "agent_id": payload.agent_id,
+                "status": "draft",
+                "dry_run": payload.dry_run,
+                "max_concurrency": payload.max_concurrency,
+                "max_attempts": payload.max_attempts,
+                "audience_source": payload.source,
+                "audience_id": payload.audience_id,
+                "audience_version": payload.audience_version,
+            },
+        )
+        provider = payload.source if payload.source.startswith("audience-") else f"audience-{payload.source}"
+        contact_ids: List[str] = []
+        rejected: List[Dict[str, Any]] = []
+        seen_external: set = set()
+        for item in payload.contacts:
+            if item.external_contact_id in seen_external:
+                rejected.append({"external_contact_id": item.external_contact_id, "reason": "duplicate_external_id"})
+                continue
+            seen_external.add(item.external_contact_id)
+            if app.state.db.is_suppressed(principal.tenant_id, item.phone):
+                rejected.append({"external_contact_id": item.external_contact_id, "reason": "suppressed_phone"})
+                continue
+            consent_state = "unknown"
+            suppressed = False
+            suppression_reason: Optional[str] = None
+            if item.consent is not None:
+                if item.consent.voice_contact_allowed:
+                    consent_state = "granted"
+                else:
+                    consent_state = "denied"
+                    suppressed = True
+                    suppression_reason = "audience_voice_consent_denied"
+            first_name, _, last_name = (item.name or "").partition(" ")
+            meta = dict(item.metadata)
+            meta.setdefault("audience_id", payload.audience_id)
+            meta.setdefault("audience_version", payload.audience_version)
+            contact = app.state.db.upsert_contact(
+                principal.tenant_id,
+                provider,
+                item.external_contact_id,
+                {
+                    "first_name": first_name or item.external_contact_id,
+                    "last_name": last_name,
+                    "phone": item.phone,
+                    "email": item.email or "",
+                    "timezone": item.timezone or "UTC",
+                    "consent_state": consent_state,
+                    "consent_source": payload.source,
+                    "suppressed": suppressed,
+                    "suppression_reason": suppression_reason,
+                    "custom_fields": meta,
+                },
+                preserve_consent=True,
+            )
+            contact_ids.append(contact["id"])
+        counts = app.state.db.campaign_counts(principal.tenant_id, campaign["id"])
+        if counts.get("recipients", 0) + len(contact_ids) > app.state.settings.max_campaign_recipients:
+            raise ApiError(422, "Campaign recipient limit exceeded", "recipient_limit")
+        added = app.state.db.add_recipients(principal.tenant_id, campaign["id"], contact_ids)
+        app.state.db.audit(
+            principal.tenant_id,
+            principal.name,
+            "campaign.audience_imported",
+            "campaign",
+            campaign["id"],
+            {
+                "source": payload.source,
+                "audience_id": payload.audience_id,
+                "audience_version": payload.audience_version,
+                "imported": len(contact_ids),
+                "added": added,
+                "rejected": rejected,
+            },
+        )
+        return {
+            "campaign_id": campaign["id"],
+            "campaign_name": campaign["name"],
+            "audience_id": payload.audience_id,
+            "audience_version": payload.audience_version,
+            "imported": len(contact_ids),
+            "added": added,
+            "rejected": rejected,
+        }
 
     @app.post("/api/v1/campaigns/{campaign_id}/recipients", status_code=201)
     def add_recipients(

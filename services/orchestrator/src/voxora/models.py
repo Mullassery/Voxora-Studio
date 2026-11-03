@@ -106,6 +106,55 @@ class ContactImport(BaseModel):
     contacts: List[ContactCreate] = Field(min_length=1, max_length=5000)
 
 
+_E164_RE = re.compile(r"^\+\d{8,15}$")
+
+
+class AudienceConsent(BaseModel):
+    model_config = {"extra": "forbid"}
+    voice_contact_allowed: bool
+    recording_allowed: bool = False
+
+
+class AudienceContact(BaseModel):
+    model_config = {"extra": "forbid"}
+    external_contact_id: str = Field(min_length=1, max_length=200)
+    name: Optional[str] = Field(default=None, max_length=200)
+    phone: str = Field(min_length=8, max_length=20)
+    email: Optional[str] = Field(default=None, max_length=320)
+    timezone: Optional[str] = Field(default=None, max_length=80)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    consent: Optional[AudienceConsent] = None
+
+    @field_validator("phone")
+    @classmethod
+    def phone_is_e164(cls, value: str) -> str:
+        if not _E164_RE.match(value.replace(" ", "")):
+            raise ValueError("phone must be E.164, e.g. +15551234567")
+        return value.replace(" ", "")
+
+
+class AudienceImport(BaseModel):
+    """Squid CRM -> Voxora audience-import envelope.
+
+    Provenance is mandatory: every campaign created from an audience records
+    where it came from and which audience version fed it. Consent is
+    honored, never silently widened: missing consent yields `consent: unknown`
+    (engine money reflects `consent_required`); explicit refusal marks the
+    contact suppressed.
+    """
+
+    model_config = {"extra": "forbid"}
+    source: str = Field(default="squid-crm", max_length=64)
+    audience_id: str = Field(min_length=1, max_length=200)
+    audience_version: str = Field(default="v1", max_length=40)
+    campaign_name: str = Field(min_length=1, max_length=160)
+    agent_id: str
+    contacts: List[AudienceContact] = Field(min_length=1, max_length=5000)
+    dry_run: bool = True
+    max_concurrency: int = Field(default=2, ge=1, le=50)
+    max_attempts: int = Field(default=2, ge=1, le=5)
+
+
 class CrmConnectionCreate(BaseModel):
     provider: str = Field(default="squid")
     name: str = Field(min_length=1, max_length=120)

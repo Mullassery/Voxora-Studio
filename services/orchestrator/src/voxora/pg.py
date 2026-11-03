@@ -102,3 +102,10 @@ class PostgresDatabase(Database):
             ]
             for statement in statements:
                 connection.execute(statement)
+            # Idempotent column additions for databases created before audience imports.
+            for column, definition in (
+                ("audience_source", "TEXT"),
+                ("audience_id", "TEXT"),
+                ("audience_version", "TEXT"),
+            ):
+                connection.execute(f"ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS {column} {definition}")  # noqa: S608 - fixed internal names

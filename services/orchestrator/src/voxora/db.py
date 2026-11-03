@@ -140,7 +140,10 @@ CREATE TABLE IF NOT EXISTS campaigns (
     started_at TEXT,
     completed_at TEXT,
     paused_at TEXT,
-    last_error TEXT
+    last_error TEXT,
+    audience_source TEXT,
+    audience_id TEXT,
+    audience_version TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_campaigns_tenant ON campaigns(tenant_id, created_at);
 
@@ -330,6 +333,24 @@ class Database:
     def initialize(self) -> None:
         with self._write() as connection:
             connection.executescript(SCHEMA)
+            self._migrate_campaigns(connection)
+
+    @staticmethod
+    def _migrate_campaigns(connection: sqlite3.Connection) -> None:
+        """Idempotent column additions for databases created before audience imports."""
+        existing = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(campaigns)").fetchall()
+        }
+        for column, definition in (
+            ("audience_source", "TEXT"),
+            ("audience_id", "TEXT"),
+            ("audience_version", "TEXT"),
+        ):
+            if column not in existing:
+                connection.execute(
+                    f"ALTER TABLE campaigns ADD COLUMN {column} {definition}"  # noqa: S608 - fixed internal names
+                )
 
     def ping(self) -> bool:
         with self._read() as connection:
@@ -607,8 +628,9 @@ class Database:
             connection.execute(
                 "INSERT INTO campaigns (id, tenant_id, name, agent_id, crm_connection_id, status,"
                 " dry_run, schedule_at, calling_window_start, calling_window_end, timezone,"
-                " max_concurrency, max_attempts, retry_backoff_seconds, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " max_concurrency, max_attempts, retry_backoff_seconds, created_at, updated_at,"
+                " audience_source, audience_id, audience_version)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     campaign_id,
                     tenant_id,
@@ -626,6 +648,9 @@ class Database:
                     int(values.get("retry_backoff_seconds", 30)),
                     now,
                     now,
+                    values.get("audience_source"),
+                    values.get("audience_id"),
+                    values.get("audience_version"),
                 ),
             )
         return self.get_campaign(tenant_id, campaign_id)  # type: ignore[return-value]

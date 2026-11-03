@@ -27,7 +27,7 @@ try:  # httpx is optional at import so `mock` keeps working without it
 except ImportError:  # pragma: no cover - httpx is a declared project dependency
     httpx = None
 
-from .engine import AgentBrain, AgentReply, AgentTurnError, MockAgent, turn_from_reply
+from .engine import AgentBrain, AgentReply, AgentTurnError, MockAgent
 
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 
