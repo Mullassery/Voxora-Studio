@@ -70,6 +70,50 @@ class SuppressionCreate(BaseModel):
     _phone = field_validator("phone")(normalize_phone)
 
 
+class VoiceSessionContact(BaseModel):
+    """The caller-of-record for one voice session (opaque external ids)."""
+
+    model_config = {"extra": "forbid"}
+    external_contact_id: str = Field(min_length=1, max_length=200)
+    phone: str
+    name: Optional[str] = Field(default=None, max_length=200)
+
+    _phone = field_validator("phone")(normalize_phone)
+
+
+class VoiceSessionAgent(BaseModel):
+    model_config = {"extra": "forbid"}
+    agent_id: str
+    model_profile: Optional[str] = Field(default=None, max_length=120)
+
+
+class VoiceSessionCreate(BaseModel):
+    """Voice-session intake per the ecosystem ADR (ADR-3B).
+
+    `session_metadata` and `external_session_id` are opaque to Voxora: the
+    caller (e.g. PyInterviewBot) owns their semantics — including any
+    interview template reference. Voxora never interprets them.
+    """
+
+    model_config = {"extra": "forbid"}
+    external_application: str = Field(min_length=1, max_length=120)
+    external_session_id: str = Field(min_length=1, max_length=200)
+    contact: VoiceSessionContact
+    agent: VoiceSessionAgent
+    session_metadata: Dict[str, Any] = Field(default_factory=dict)
+    webhook_url: Optional[str] = Field(default=None, max_length=2000)
+
+
+class SessionInstruction(BaseModel):
+    """Mid-call instruction; delivery depends on provider capabilities."""
+
+    model_config = {"extra": "forbid"}
+    instruction_id: str = Field(min_length=1, max_length=200)
+    type: str = Field(default="speak", max_length=40)
+    text: str = Field(min_length=1, max_length=2000)
+    priority: str = Field(default="normal", max_length=20)
+
+
 class CampaignCreate(BaseModel):
     model_config = {"extra": "forbid"}  # typos must fail loudly, not be ignored
     name: str = Field(min_length=1, max_length=160)

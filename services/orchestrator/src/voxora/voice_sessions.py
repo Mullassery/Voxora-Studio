@@ -1,0 +1,181 @@
+"""Voice-session service: the CRM-external session lifecycle over call rows.
+
+Ownership per the ecosystem ADR (docs/migration/migration-adr.md): Voxora
+owns voice-session state, telephony, transcript records, and outbound event
+delivery. The requesting application (e.g. PyInterviewBot) owns whatever the
+`external_session_id` semantically references — Voxora treats it as opaque.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+import urllib.request  # stdlib transport: no new dependency; tests inject fakes
+from typing import Any, Callable, Dict, List, Optional
+
+from .db import Database, iso
+
+# voice_session.* event types per the versioned envelope contract.
+EVENT_VERSION = "1.0"
+
+_DISPOSITION_STATUS = {
+    "answered": "completed",
+    "completed": "completed",
+    "busy": "busy",
+    "no_answer": "no_answer",
+    "failed": "failed",
+    "canceled": "terminated",
+}
+
+_SESSION_TERMINAL = {"completed", "busy", "no_answer", "failed", "terminated", "canceled"}
+
+TRANSPORT: Any = urllib.request.urlopen  # overridable in tests/post-deploy
+
+
+class VoiceSessionError(Exception):
+    """Voice-session misuse (unknown session, invalid transition)."""
+
+    def __init__(self, status_code: int, message: str, code: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
+
+
+def build_event(
+    tenant_id: str,
+    session: Dict[str, Any],
+    event_type: str,
+    data: Optional[Dict[str, Any]] = None,
+    occurred_at: Optional[str] = None,
+    event_id: str = "",
+) -> Dict[str, Any]:
+    """Versioned event envelope; `event_id` filled after persistence when known."""
+    return {
+        "event_id": event_id,
+        "event_type": event_type,
+        "event_version": EVENT_VERSION,
+        "occurred_at": occurred_at or iso(),
+        "workspace": tenant_id,
+        "session_id": session["id"],
+        "external_application": session["external_application"],
+        "external_session_id": session["external_session_id"],
+        "data": data or {},
+    }
+
+
+def session_status_for(disposition: str, ok: bool) -> str:
+    if not ok:
+        return "failed" if disposition != "canceled" else "terminated"
+    return _DISPOSITION_STATUS.get(disposition, "completed" if ok else "failed")
+
+
+def settle_voice_session(
+    db: Database,
+    call: Dict[str, Any],
+    disposition: str,
+    ok: bool,
+    result: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    """Terminal settle for a campaign-less voice-session call (Twilio callbacks).
+
+    Keeps the sole-writer rule: only this path transitions the session after
+    dialing, and every transition emits the versioned event envelope.
+    """
+    tenant_id = call["tenant_id"]
+    session = db.get_voice_session_by_call(tenant_id, call["id"])
+    if session is None:
+        return None
+    status = session_status_for(disposition, ok)
+    data: Dict[str, Any] = {"status": status, "disposition": disposition}
+    if result:
+        data.update(result)
+    prior = session["status"]
+    if session["status"] != "terminated":
+        db.update_voice_session(tenant_id, session["id"], status=status)
+    db.record_voice_session_event(
+        tenant_id,
+        session["id"],
+        f"voice_session.{status}",
+        data,
+    )
+    transcript = session.get("transcript") or []
+    if status == "completed" and transcript and prior != "completed":
+        db.record_voice_session_event(
+            tenant_id,
+            session["id"],
+            "transcript.ready",
+            {"transcript_available": True},
+        )
+    return status
+
+
+def deliver_webhook(
+    url: str,
+    event: Dict[str, Any],
+    secret: str,
+    transport: Optional[Callable[[Any, Any], Any]] = None,
+    timeout_seconds: float = 5.0,
+) -> tuple:
+    """Signed at-least-once delivery; returns (ok, detail).
+
+    Signature: HMAC-SHA256 over the exact body bytes, header
+    ``x-voxora-signature: v1=<hex>``. Consumers must verify before trusting
+    (same rule the PyInterviewBot side already honours for inbound).
+    """
+    body = json.dumps(event, sort_keys=True).encode("utf-8")
+    digest = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "x-voxora-signature": f"v1={digest}",
+        },
+        method="POST",
+    )
+    used_transport = transport if transport is not None else TRANSPORT
+    try:
+        with used_transport(request, timeout=timeout_seconds) as response:  # type: ignore[call-arg]  # transport principal
+            code = getattr(response, "status", getattr(response, "getcode", lambda: 0)())
+            ok = 200 <= int(code) < 300
+            return ok, f"http_{code}"
+    except Exception as error:  # classified honestly below
+        return False, f"{type(error).__name__}: {error}"[:500]
+
+
+def dispatch_session_events(
+    db: Database,
+    tenant_id: str,
+    session_id: str,
+    webhook_url: str,
+    secret: str,
+    transport: Optional[Callable[[Any, Any], Any]] = None,
+    max_attempts: int = 3,
+) -> List[int]:
+    """Attempt delivery of every undelivered recorded event (bounded retries)."""
+    outcomes: List[int] = []
+    for event in db.list_voice_session_events(tenant_id, session_id):
+        envelope = {
+            "event_id": event["id"],
+            "event_type": event["event_type"],
+            "event_version": event.get("event_version", EVENT_VERSION),
+            "occurred_at": event["occurred_at"],
+            "session_id": session_id,
+            "external_application": None,  # filled below from session
+            "external_session_id": None,
+            "data": event.get("data", {}),
+        }
+        session = db.get_voice_session(tenant_id, session_id)
+        if session is None:
+            raise VoiceSessionError(404, "Voice session not found", "unknown_session")
+        envelope["external_application"] = session["external_application"]
+        envelope["external_session_id"] = session["external_session_id"]
+        attempts = db.list_event_deliveries(tenant_id, event["id"])
+        attempt = len(attempts) + 1
+        ok, detail = deliver_webhook(webhook_url, envelope, secret, transport)
+        db.record_event_delivery(tenant_id, event["id"], session_id, attempt, ok, detail)
+        outcomes.append(1 if ok else 0)
+        if len(attempts) + 1 >= max_attempts:
+            continue
+    return outcomes

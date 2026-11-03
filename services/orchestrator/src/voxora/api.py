@@ -31,7 +31,9 @@ from .models import (
     CrmSyncRequest,
     MappingsUpdate,
     RecipientAdd,
+    SessionInstruction,
     SuppressionCreate,
+    VoiceSessionCreate,
 )
 from .observability import configure_logging
 from .security import SecretBox, safe_equal
@@ -84,6 +86,89 @@ def _page(items: List[Dict[str, Any]], total: int, limit: int, offset: int) -> D
 
 def now_iso() -> str:
     return iso()
+
+
+_VOICE_SESSION_TERMINAL = {"completed", "busy", "no_answer", "failed", "terminated", "canceled"}
+
+
+def _telephony_capabilities(settings: Any) -> Dict[str, Any]:
+    """Capability honesty for the provider selected at start-up.
+
+    Contracts advertise what the CURRENT provider + transport can do; the
+    instruction contract returns provider-labeled reasons on 409 instead of
+    silently dropping instructions.
+    """
+    provider = settings.telephony_provider
+    if provider == "mock":
+        return {
+            "provider": provider,
+            "simulated": True,
+            "final_on_place": True,
+            "transcript": True,
+            "mid_call_instructions": False,
+            "message": "Mock adapter completes synchronously and cannot accept mid-call instructions.",
+        }
+    if provider == "voice-runtime":
+        return {
+            "provider": provider,
+            "simulated": True,
+            "final_on_place": True,
+            "transcript": True,
+            "mid_call_instructions": False,
+            "message": "Scripted Rust bridge; instruction injection arrives with the media pipeline slice.",
+        }
+    if provider == "twilio" and settings.allow_live_calls:
+        return {
+            "provider": provider,
+            "simulated": False,
+            "final_on_place": False,
+            "transcript": False,
+            "mid_call_instructions": False,
+            "message": "Twilio Live: statuses settle via callbacks; mid-call instructions need Twilio's speech modification API (not wired in this slice).",
+        }
+    return {
+        "provider": provider,
+        "simulated": True,
+        "final_on_place": False,
+        "transcript": False,
+        "mid_call_instructions": False,
+        "message": "Dry-run Twilio contract adapter.",
+    }
+
+
+def _voice_session_view(
+    app: FastAPI, principal: TenantPrincipal, session: Dict[str, Any]
+) -> Dict[str, Any]:
+    if not session:
+        raise ApiError(404, "Voice session not found", "unknown_session")
+    db: Database = app.state.db
+    call = db.get_call(principal.tenant_id, session["call_id"]) if session["call_id"] else None
+    events = db.list_voice_session_events(principal.tenant_id, session["id"])
+    return {
+        "session_id": session["id"],
+        "external_application": session["external_application"],
+        "external_session_id": session["external_session_id"],
+        "status": session["status"],
+        "agent_id": session["agent_id"],
+        "model_profile": session["model_profile"],
+        "provider": session["provider"],
+        "simulated": bool(session["simulated"]),
+        "transcript_available": bool(session["transcript"] or []),
+        "call_id": session["call_id"],
+        "call_status": call["status"] if call else None,
+        "events": [
+            {
+                "event_id": event["id"],
+                "event_type": event["event_type"],
+                "event_version": event.get("event_version", "1.0"),
+                "occurred_at": event["occurred_at"],
+            }
+            for event in events
+        ],
+        "webhook_url": session["webhook_url"],
+        "created_at": session["created_at"],
+        "updated_at": session["updated_at"],
+    }
 
 
 @asynccontextmanager
@@ -543,6 +628,260 @@ def create_app(
         added = app.state.db.add_recipients(principal.tenant_id, campaign_id, result["contactIds"])
         app.state.db.audit(principal.tenant_id, principal.name, "campaign.recipients_synced", "campaign", campaign_id, {"imported": result["imported"], "updated": result["updated"], "added": added})
         return {**result, "addedToCampaign": added}
+
+    # ------------------------------------------- voice sessions (external)
+    @app.post("/api/v1/voice-sessions", status_code=201)
+    def create_voice_session(
+        payload: VoiceSessionCreate,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        """Idempotent session intake; consent/suppression gates are fail-closed."""
+        _require_writer(principal)
+        tenant_id = principal.tenant_id
+        agent_row = app.state.db.get_agent(tenant_id, payload.agent.agent_id)
+        if not agent_row:
+            raise ApiError(404, "Agent not found", "agent_not_found")
+        if app.state.db.is_suppressed(tenant_id, payload.contact.phone):
+            raise ApiError(422, "Phone number is globally suppressed", "suppressed_phone")
+        consent = app.state.db.get_contact_by_phone(payload.contact.phone, tenant_id)
+        if consent is None:
+            consent = app.state.db.create_local_contact(
+                tenant_id,
+                {
+                    "first_name": (payload.contact.name or "").split(" ")[0]
+                    or payload.contact.external_contact_id,
+                    "last_name": " ".join((payload.contact.name or "").split(" ")[1:]),
+                    "phone": payload.contact.phone,
+                    "consent_state": "unknown",
+                },
+            )
+        if consent["suppressed"] or consent["consent_state"] != "granted":
+            raise ApiError(
+                422,
+                "Call refused: no granted consent record for this phone",
+                "consent_required",
+            )
+        existing = app.state.db.get_voice_session_by_external(
+            tenant_id, payload.external_application, payload.external_session_id
+        )
+        if existing is not None:
+            return _voice_session_view(app, principal, existing)
+        first_name, _, last_name = (payload.contact.name or "").partition(" ")
+        contact = app.state.db.upsert_contact(
+            tenant_id,
+            "voice-session",
+            payload.contact.external_contact_id,
+            {
+                "first_name": first_name or payload.contact.external_contact_id,
+                "last_name": last_name,
+                "phone": payload.contact.phone,
+                "consent_state": consent["consent_state"],
+                "consent_source": consent["consent_source"],
+                "custom_fields": {
+                    "external_application": payload.external_application,
+                    "session_metadata": payload.session_metadata,
+                },
+            },
+            preserve_consent=True,
+        )
+        session = app.state.db.create_voice_session(
+            tenant_id,
+            {
+                "external_application": payload.external_application,
+                "external_session_id": payload.external_session_id,
+                "agent_id": payload.agent.agent_id,
+                "model_profile": payload.agent.model_profile,
+                "contact_id": contact["id"],
+                "status": "created",
+                "webhook_url": payload.webhook_url,
+                "session_metadata": payload.session_metadata,
+                "provider": app.state.settings.telephony_provider,
+                "simulated": app.state.settings.telephony_provider != "twilio"
+                or not app.state.settings.allow_live_calls,
+            },
+        )
+        app.state.db.record_voice_session_event(
+            tenant_id, session["id"], "voice_session.created", {"status": "created"}
+        )
+        call = app.state.db.create_voice_call(
+            tenant_id,
+            session["id"],
+            contact["id"],
+            app.state.settings,
+            payload.agent.agent_id,
+        )
+        session = app.state.db.update_voice_session(tenant_id, session["id"], call_id=call["id"], status="queued")
+        app.state.db.record_voice_session_event(
+            tenant_id, session["id"], "voice_session.queued", {"call_id": call["id"]}
+        )
+        from .campaign import CampaignEngine
+
+        engine = app.state.engine
+        assert isinstance(engine, CampaignEngine)
+        from .telephony.base import CallRequest
+
+        app.state.db.update_call(
+            tenant_id,
+            call["id"],
+            target="dialing" if app.state.settings.telephony_provider != "twilio" else "dialing",
+        )
+        request = CallRequest(
+            call_id=call["id"],
+            campaign_id=session["id"],
+            to_number=payload.contact.phone,
+            from_number=app.state.settings.twilio_from_number,
+            idempotency_key=call["idempotency_key"],
+            attempt=1,
+            dry_run=bool(call["simulated"]),
+            agent={"system_prompt": agent_row.get("system_prompt", "")},
+            metadata={"voice_session_id": session["id"], "external_session_id": payload.external_session_id},
+        )
+        result = app.state.telephony.start_call(request)
+        app.state.db.apply_voice_session_result(principal.tenant_id, call["id"], result)
+        session = app.state.db.update_voice_session(
+            tenant_id,
+            session["id"],
+            status="dialing",
+            transcript=result.transcript or [],
+        )
+        from .voice_sessions import settle_voice_session
+
+        if getattr(result, "final", True):
+            settle_voice_session(
+                app.state.db,
+                {"tenant_id": tenant_id, "id": call["id"]},
+                result.disposition,
+                bool(result.ok),
+                {"simulated": bool(result.simulated), "transcript_available": bool(result.transcript)},
+            )
+            session = app.state.db.get_voice_session(tenant_id, session["id"]) or session
+        else:
+            session = app.state.db.update_voice_session(
+                tenant_id, session["id"], status="dialing"
+            )
+        return _voice_session_view(app, principal, session)
+
+    @app.get("/api/v1/voice-sessions/{session_id}")
+    def get_voice_session(
+        session_id: str,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        session = app.state.db.get_voice_session(principal.tenant_id, session_id)
+        if not session:
+            raise ApiError(404, "Voice session not found", "unknown_session")
+        return _voice_session_view(app, principal, session)
+
+    @app.post("/api/v1/voice-sessions/{session_id}/terminate")
+    def terminate_voice_session(
+        session_id: str,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        _require_writer(principal)
+        session = app.state.db.get_voice_session(principal.tenant_id, session_id)
+        if not session:
+            raise ApiError(404, "Voice session not found", "unknown_session")
+        if session["status"] in {"completed", "busy", "no_answer", "failed", "terminated"}:
+            return _voice_session_view(app, principal, session)
+        call = app.state.db.get_call(principal.tenant_id, session["call_id"]) if session["call_id"] else None
+        provider_call_id = call.get("provider_call_id") if call else None
+        canceled_via_provider = False
+        if provider_call_id and call is not None and call["simulated"] == 0:
+            canceled_via_provider = app.state.telephony.cancel_call(provider_call_id)
+        disposition = "canceled" if canceled_via_provider or call else "canceled"
+        from .voice_sessions import settle_voice_session
+
+        if call is not None:
+            result = app.state.db.update_call(
+                principal.tenant_id,
+                call["id"],
+                target="canceled",
+                disposition=disposition,
+                ended_at=iso(),
+            )
+            if result:
+                app.state.db.add_call_event(
+                    principal.tenant_id, call["id"], "canceled", data={"by": principal.name}
+                )
+        if call is not None:
+            settle_voice_session(app.state.db, call, "canceled", True)
+        updated = app.state.db.update_voice_session(principal.tenant_id, session_id, status="terminated")
+        session = updated or session
+        app.state.db.record_voice_session_event(
+            principal.tenant_id,
+            session_id,
+            "voice_session.terminated",
+            {"by": principal.name, "canceled_via_provider": canceled_via_provider},
+        )
+        return _voice_session_view(app, principal, session)
+
+    @app.get("/api/v1/voice-sessions/{session_id}/transcript")
+    def get_voice_session_transcript(
+        session_id: str,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        session = app.state.db.get_voice_session(principal.tenant_id, session_id)
+        if not session:
+            raise ApiError(404, "Voice session not found", "unknown_session")
+        transcript = session["transcript"] or []
+        if not transcript:
+            # Transcript records exist only where the provider returned a
+            # real transcript; live providers record references once wired.
+            return {"session_id": session_id, "transcript_available": False, "entries": []}
+        return {
+            "session_id": session_id,
+            "transcript_available": True,
+            "entries": transcript,
+        }
+
+    @app.post("/api/v1/voice-sessions/{session_id}/instructions")
+    def post_session_instruction(
+        session_id: str,
+        payload: SessionInstruction,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        """Capability-honest mid-call instructions.
+
+        Single signed endpoint, honest about the provider matrix: providers
+        that cannot inject mid-call audio reject with 409 while still
+        recording the instruction for operators, never silently dropping it.
+        """
+        _require_writer(principal)
+        session = app.state.db.get_voice_session(principal.tenant_id, session_id)
+        if not session:
+            raise ApiError(404, "Voice session not found", "unknown_session")
+        row = app.state.db.create_session_instruction(
+            principal.tenant_id,
+            session_id,
+            {
+                "instruction_id": payload.instruction_id,
+                "type": payload.type,
+                "text": payload.text,
+                "priority": payload.priority,
+            },
+        )
+        capabilities = _telephony_capabilities(app.state.settings)
+        if not capabilities.get("mid_call_instructions"):
+            raise ApiError(
+                409,
+                (
+                    f"Provider '{session['provider']}' does not support mid-call instruction "
+                    "injection in this slice; instruction recorded, capability documented."
+                ),
+                "instruction_unsupported",
+                details={"instruction": row, "provider_capabilities": capabilities},
+            )
+        app.state.db.record_voice_session_event(
+            principal.tenant_id,
+            session_id,
+            "voice_session.instruction_received",
+            {"instruction_id": payload.instruction_id, "type": payload.type},
+        )
+        return {
+            "instruction": row,
+            "provider_capabilities": capabilities,
+            "applied": False,
+            "recorded": True,
+        }
 
     # ------------------------------------------------------------- contacts
     @app.get("/api/v1/contacts")

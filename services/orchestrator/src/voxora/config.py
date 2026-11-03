@@ -56,6 +56,7 @@ class Settings:
     storage: str = "sqlite"
     database_url: Optional[str] = None
     secret_key: str = "development-only-secret-key-change-me"
+    outbound_webhook_secret: str = "development-only-outbound-webhook-secret-0123456"
     api_tokens: Dict[str, TenantPrincipal] = field(default_factory=lambda: dict(DEFAULT_TOKENS))
     cors_origins: List[str] = field(
         default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"]
@@ -106,6 +107,10 @@ class Settings:
             secret_key=os.getenv(
                 "VOXORA_SECRET_KEY", "development-only-secret-key-change-me"
             ),
+            outbound_webhook_secret=os.getenv(
+                "VOXORA_OUTBOUND_WEBHOOK_SECRET",
+                "development-only-outbound-webhook-secret-0123456",
+            ),
             api_tokens=tokens,
             cors_origins=origins,
             seed_demo=_bool(os.getenv("VOXORA_SEED_DEMO"), True),
@@ -143,6 +148,12 @@ class Settings:
             raise ValueError("VOXORA_SECRET_KEY must be at least 32 characters")
         if self.env == "production" and "development-only" in self.secret_key:
             raise ValueError("Refusing to start production with the development secret key")
+        if self.env == "production" and "development-only" in self.outbound_webhook_secret:
+            raise ValueError(
+                "Refusing to start production with the development outbound webhook secret"
+            )
+        if len(self.outbound_webhook_secret) < 32:
+            raise ValueError("VOXORA_OUTBOUND_WEBHOOK_SECRET must be at least 32 characters")
         if self.telephony_provider == "twilio":
             missing = [
                 name

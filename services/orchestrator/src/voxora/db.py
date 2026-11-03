@@ -211,6 +211,62 @@ CREATE TABLE IF NOT EXISTS call_latency (
 );
 CREATE INDEX IF NOT EXISTS idx_latency_tenant ON call_latency(tenant_id, stage, simulated);
 
+CREATE TABLE IF NOT EXISTS voice_sessions (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    external_application TEXT NOT NULL,
+    external_session_id TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    model_profile TEXT,
+    contact_id TEXT NOT NULL,
+    call_id TEXT,
+    status TEXT NOT NULL,
+    webhook_url TEXT,
+    session_metadata TEXT NOT NULL DEFAULT '{}',
+    transcript TEXT NOT NULL DEFAULT '[]',
+    provider TEXT NOT NULL DEFAULT 'mock',
+    simulated INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(tenant_id, external_application, external_session_id)
+);
+CREATE INDEX IF NOT EXISTS idx_voice_sessions_tenant ON voice_sessions(tenant_id, created_at);
+
+CREATE TABLE IF NOT EXISTS voice_session_events (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    event_version TEXT NOT NULL DEFAULT '1.0',
+    occurred_at TEXT NOT NULL,
+    data TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_voice_session_events_session ON voice_session_events(session_id, occurred_at);
+
+CREATE TABLE IF NOT EXISTS voice_session_instructions (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    instruction_id TEXT NOT NULL,
+    type TEXT NOT NULL,
+    text TEXT NOT NULL,
+    priority TEXT NOT NULL DEFAULT 'normal',
+    status TEXT NOT NULL DEFAULT 'received',
+    created_at TEXT NOT NULL,
+    UNIQUE(session_id, instruction_id)
+);
+
+CREATE TABLE IF NOT EXISTS voice_session_deliveries (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    ok INTEGER NOT NULL DEFAULT 0,
+    detail TEXT,
+    at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS crm_connections (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
@@ -619,6 +675,206 @@ class Database:
                 "DELETE FROM suppression_list WHERE tenant_id=? AND phone=?", (tenant_id, phone)
             )
             return cursor.rowcount > 0
+
+    # ------------------------------------------------------- voice sessions
+    def create_voice_session(self, tenant_id: str, values: Dict[str, Any]) -> Dict[str, Any]:
+        """Idempotent session creation on (tenant, external_application, external_session_id)."""
+        now = iso()
+        with self._write() as connection:
+            connection.execute(
+                "INSERT INTO voice_sessions (id, tenant_id, external_application,"
+                " external_session_id, agent_id, model_profile, contact_id, call_id, status,"
+                " webhook_url, session_metadata, transcript, provider, simulated,"
+                " created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(tenant_id, external_application, external_session_id) DO NOTHING",
+                (
+                    values.get("id") or new_id("vxs"),
+                    tenant_id,
+                    values["external_application"],
+                    values["external_session_id"],
+                    values["agent_id"],
+                    values.get("model_profile"),
+                    values["contact_id"],
+                    values.get("call_id"),
+                    values.get("status", "created"),
+                    values.get("webhook_url"),
+                    json.dumps(values.get("session_metadata", {})),
+                    json.dumps(values.get("transcript", [])),
+                    values.get("provider", "mock"),
+                    int(bool(values.get("simulated", True))),
+                    now,
+                    now,
+                ),
+            )
+        # RETURNING-equivalent read keeps sqlite/postgres symmetry.
+        session_id = values.get("id") or ""
+        session = self.get_voice_session(tenant_id, session_id) or self.get_voice_session_by_external(
+            tenant_id, values["external_application"], values["external_session_id"]
+        )
+        if session is None:  # contract: the row exists directly after the upsert
+            raise RuntimeError("voice session row vanished after upsert")
+        return session
+
+    def get_voice_session(self, tenant_id: str, session_id: str) -> Optional[Dict[str, Any]]:
+        if not session_id:
+            return None
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT * FROM voice_sessions WHERE tenant_id=? AND id=?",
+                (tenant_id, session_id),
+            ).fetchone()
+        return self._decode(row) if row else None
+
+    def get_voice_session_by_external(
+        self, tenant_id: str, external_application: str, external_session_id: str
+    ) -> Optional[Dict[str, Any]]:
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT * FROM voice_sessions WHERE tenant_id=? AND external_application=?"
+                " AND external_session_id=?",
+                (tenant_id, external_application, external_session_id),
+            ).fetchone()
+        return self._decode(row) if row else None
+
+    def get_voice_session_by_call(self, tenant_id: str, call_id: str) -> Optional[Dict[str, Any]]:
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT * FROM voice_sessions WHERE tenant_id=? AND call_id=?",
+                (tenant_id, call_id),
+            ).fetchone()
+        return self._decode(row) if row else None
+
+    def update_voice_session(
+        self, tenant_id: str, session_id: str, **fields: Any
+    ) -> Optional[Dict[str, Any]]:
+        allowed = {
+            "status",
+            "call_id",
+            "transcript",
+            "provider",
+            "simulated",
+            "webhook_url",
+        }
+        updates = [(key, value) for key, value in fields.items() if key in allowed]
+        if not updates:
+            return self.get_voice_session(tenant_id, session_id)
+        setters = ", ".join(f"{key}=?" for key, _ in updates)
+        params: List[Any] = []
+        for key, value in updates:
+            params.append(json.dumps(value) if key in ("transcript",) else value)
+        params += [iso(), tenant_id, session_id]
+        with self._write() as connection:
+            connection.execute(
+                f"UPDATE voice_sessions SET {setters}, updated_at=? WHERE tenant_id=? AND id=?",
+                params,
+            )
+        return self.get_voice_session(tenant_id, session_id)
+
+    def record_voice_session_event(
+        self,
+        tenant_id: str,
+        session_id: str,
+        event_type: str,
+        data: Optional[Dict[str, Any]] = None,
+        occurred_at: Optional[str] = None,
+        event_version: str = "1.0",
+    ) -> Dict[str, Any]:
+        event_id = new_id("vxe")
+        occurred = occurred_at or iso()
+        with self._write() as connection:
+            connection.execute(
+                "INSERT INTO voice_session_events (id, tenant_id, session_id, event_type,"
+                " event_version, occurred_at, data)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (event_id, tenant_id, session_id, event_type, event_version, occurred, json.dumps(data or {})),
+            )
+        return {
+            "event_id": event_id,
+            "event_type": event_type,
+            "event_version": event_version,
+            "occurred_at": occurred,
+            "session_id": session_id,
+            "data": data or {},
+        }
+
+    def list_voice_session_events(self, tenant_id: str, session_id: str) -> List[Dict[str, Any]]:
+        with self._read() as connection:
+            rows = connection.execute(
+                "SELECT * FROM voice_session_events WHERE tenant_id=? AND session_id=?"
+                " ORDER BY occurred_at ASC",
+                (tenant_id, session_id),
+            ).fetchall()
+        return [self._decode(row) for row in rows]
+
+    def create_session_instruction(
+        self, tenant_id: str, session_id: str, values: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Idempotent instruction intake; returns the row (created or existing)."""
+        with self._write() as connection:
+            cursor = connection.execute(
+                "INSERT INTO voice_session_instructions (id, tenant_id, session_id,"
+                " instruction_id, type, text, priority, status, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, 'received', ?)"
+                " ON CONFLICT(session_id, instruction_id) DO NOTHING",
+                (
+                    new_id("vxi"),
+                    tenant_id,
+                    session_id,
+                    values["instruction_id"],
+                    values["type"],
+                    values["text"],
+                    values.get("priority", "normal"),
+                    iso(),
+                ),
+            )
+            if cursor.rowcount == 0:
+                with self._read() as connection:
+                    row = connection.execute(
+                        "SELECT * FROM voice_session_instructions WHERE session_id=? AND instruction_id=?",
+                        (session_id, values["instruction_id"]),
+                    ).fetchone()
+                return self._decode(row) if row else None
+            row = connection.execute(
+                "SELECT * FROM voice_session_instructions WHERE session_id=? AND instruction_id=?",
+                (session_id, values["instruction_id"]),
+            ).fetchone()
+        return self._decode(row) if row else None
+
+    def list_session_instructions(self, tenant_id: str, session_id: str) -> List[Dict[str, Any]]:
+        with self._read() as connection:
+            rows = connection.execute(
+                "SELECT * FROM voice_session_instructions WHERE tenant_id=? AND session_id=?"
+                " ORDER BY created_at ASC",
+                (tenant_id, session_id),
+            ).fetchall()
+        return [self._decode(row) for row in rows]
+
+    def record_event_delivery(
+        self,
+        tenant_id: str,
+        event_id: str,
+        session_id: str,
+        attempt: int,
+        ok: bool,
+        detail: Optional[str],
+    ) -> None:
+        with self._write() as connection:
+            connection.execute(
+                "INSERT INTO voice_session_deliveries (id, tenant_id, event_id, session_id,"
+                " attempt, ok, detail, at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (new_id("vxd"), tenant_id, event_id, session_id, attempt, int(ok), detail, iso()),
+            )
+
+    def list_event_deliveries(self, tenant_id: str, event_id: str) -> List[Dict[str, Any]]:
+        with self._read() as connection:
+            rows = connection.execute(
+                "SELECT * FROM voice_session_deliveries WHERE tenant_id=? AND event_id=?"
+                " ORDER BY attempt ASC",
+                (tenant_id, event_id),
+            ).fetchall()
+        return [self._decode(row) for row in rows]
 
     # --------------------------------------------------------------- campaigns
     def create_campaign(self, tenant_id: str, values: Dict[str, Any]) -> Dict[str, Any]:
@@ -1041,6 +1297,104 @@ class Database:
         return recovered
 
     # ------------------------------------------------------------------- calls
+    def get_contact_by_phone(self, phone: str, tenant_id: str) -> Optional[Dict[str, Any]]:
+        """Consent lives with the phone, not the provider namespace."""
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT * FROM contacts WHERE tenant_id=? AND phone=? ORDER BY updated_at DESC",
+                (tenant_id, phone),
+            ).fetchone()
+        return self._decode(row) if row else None
+
+    def create_voice_call(
+        self,
+        tenant_id: str,
+        session_id: str,
+        contact_id: str,
+        settings: Any,
+        agent_id: str,
+    ) -> Dict[str, Any]:
+        """Session-sourced call row (campaign column carries the session id)."""
+        call_id = new_id("call")
+        idempotency_key = f"vxs:{session_id}:1"
+        simulated = settings.telephony_provider != "twilio" or not settings.allow_live_calls
+        now = iso()
+        with self._write() as connection:
+            connection.execute(
+                "INSERT INTO calls (id, tenant_id, campaign_id, recipient_id, contact_id,"
+                " provider, status, direction, simulated, attempt, idempotency_key,"
+                " created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, 'queued', 'outbound', ?, 1, ?, ?, ?)",
+                (
+                    call_id,
+                    tenant_id,
+                    session_id,
+                    contact_id,
+                    contact_id,
+                    settings.telephony_provider,
+                    int(bool(simulated)),
+                    idempotency_key,
+                    now,
+                    now,
+                ),
+            )
+        self.add_call_event(tenant_id, call_id, "queued", data={"idempotencyKey": idempotency_key})
+        call = self.get_call(tenant_id, call_id)
+        if call is None:  # caller contract: the row exists right after insert
+            raise RuntimeError("voice call row vanished after insert")
+        return call
+
+    def apply_voice_session_result(self, tenant_id: str, call_id: str, result: Any) -> None:
+        """Apply a telephony result to a session call row (no recipient fans-out)."""
+        for event in result.events:
+            self.add_call_event(tenant_id, call_id, event.event_type, event.at, event.data)
+        # Mirror provider progress events onto the session envelope honestly.
+        session = self.get_voice_session_by_call(tenant_id, call_id)
+        if session is not None:
+            mirrored = {
+                "dialing": "voice_session.ringing",
+                "ringing": "voice_session.ringing",
+                "in_progress": "voice_session.in_progress",
+                "answered": "voice_session.answered",
+            }
+            for event in result.events:
+                session_event = mirrored.get(event.event_type)
+                if session_event:
+                    self.record_voice_session_event(
+                        tenant_id, session["id"], session_event, dict(event.data)
+                    )
+        if not getattr(result, "final", True):
+            self.update_call(
+                tenant_id,
+                call_id,
+                target="dialing",
+                provider=result.provider,
+                provider_call_id=result.provider_call_id,
+                started_at=result.started_at,
+            )
+            return
+        for stage, duration in result.latency_ms.items():
+            self.add_latency(tenant_id, call_id, stage, duration, result.simulated)
+        fields: Dict[str, Any] = {
+            "provider": result.provider,
+            "provider_call_id": result.provider_call_id,
+            "ended_at": result.ended_at,
+            "disposition": result.disposition,
+        }
+        if result.ok and result.status == "completed":
+            fields.update(answered_at=result.answered_at, duration_ms=result.duration_ms)
+            self.update_call(tenant_id, call_id, target="completed", **fields)
+            return
+        target_map = {
+            "no_answer": "no_answer",
+            "busy": "busy",
+        }
+        target = target_map.get(result.status, "failed")
+        if result.error_code:
+            fields["error_code"] = result.error_code
+        fields["error_message"] = result.error_message
+        self.update_call(tenant_id, call_id, target=target, **fields)
+
     def get_call(self, tenant_id: str, call_id: str) -> Optional[Dict[str, Any]]:
         with self._read() as connection:
             row = connection.execute(

@@ -266,7 +266,18 @@ class CampaignEngine:
             return "duplicate"
         campaign = self.db.get_campaign(tenant_id, call["campaign_id"])
         if campaign is None:
-            return "unknown_campaign"
+            # Voice-session calls carry the session id in campaign_id; they
+            # settle through the session service, not the campaign engine.
+            from .telephony.base import TelephonyResult as _TR
+            from .voice_sessions import settle_voice_session
+
+            if isinstance(result, _TR):
+                status = settle_voice_session(
+                    self.db, call, result.disposition, result.ok, {"simulated": result.simulated}
+                )
+                return "settled" if status else "unknown_call"
+            status = settle_voice_session(self.db, call, "", False)
+            return "settled" if status else "unknown_campaign"
         self._apply_result(
             {
                 "id": call["recipient_id"],
