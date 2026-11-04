@@ -1314,6 +1314,34 @@ def create_app(
         call = request.app.state.db.get_call_by_provider_call_id(call_sid)
         if call is None:
             raise HTTPException(status_code=404, detail=_error_body("call_not_found", "No call matches CallSid"))
+        # Recording callback (roadmap M5/P2): Twilio posts recording status as
+        # its own signed callback carrying RecordingUrl/RecordingSid. Store the
+        # reference on the voice session and emit recording.ready; downstream
+        # consumers read recordings via the outbound contract only.
+        recording_url = form.get("RecordingUrl") or ""
+        if recording_url:
+            db = request.app.state.db
+            voice_session = db.get_voice_session_by_call(call["tenant_id"], call["id"])
+            if voice_session is not None:
+                recording_sid = form.get("RecordingSid") or ""
+                db.update_voice_session(
+                    call["tenant_id"],
+                    voice_session["id"],
+                    recording_url=recording_url,
+                    recording_sid=recording_sid,
+                )
+                db.record_voice_session_event(
+                    call["tenant_id"],
+                    voice_session["id"],
+                    "recording.ready",
+                    {"recording_url": recording_url, "recording_sid": recording_sid},
+                )
+                from .voice_sessions import dispatch_pending_webhooks
+
+                dispatch_pending_webhooks(
+                    db, request.app.state.settings, call["tenant_id"], voice_session["id"]
+                )
+            return Response(content="<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response/>", media_type="application/xml")
         from datetime import datetime, timezone
 
         adapter = request.app.state.telephony

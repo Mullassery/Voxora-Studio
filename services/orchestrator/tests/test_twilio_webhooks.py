@@ -7,6 +7,7 @@ start -> signed status callback -> final state.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, List, Optional
 
 from tests.test_twilio_adapter import _XML_CALL_CREATED, FakeTwilioTransport
@@ -189,3 +190,86 @@ def test_async_provider_leaves_calls_in_flight_not_fake_completed(settings, clie
     details = db.get_call_detail("tenant-a", calls[0]["id"])
     events = [event["event_type"] for event in details["events"]]
     assert "dialing" in events
+
+
+def test_recording_callback_stores_pointer_and_emits_recording_ready(
+    settings, client, fake_pyreverseetl_transport
+) -> None:
+    settings = _configured(settings)
+    client.app.state.settings = settings
+    _twilio_adapter(client, live=False)
+    db = client.app.state.db
+    agent = db.create_agent("tenant-a", {"name": "A"})
+    contact = db.create_local_contact(
+        "tenant-a", {"first_name": "C", "phone": "+15551234800", "consent_state": "granted"}
+    )
+    session = db.create_voice_session(
+        "tenant-a",
+        {
+            "external_application": "pyinterviewbot",
+            "external_session_id": "rec_001",
+            "agent_id": agent["id"],
+            "contact_id": contact["id"],
+            "webhook_url": "https://consumer.example.com/wh",
+        },
+    )
+    call = db.create_voice_call("tenant-a", session["id"], contact["id"], settings, agent["id"])
+    db.update_voice_session("tenant-a", session["id"], call_id=call["id"])
+    db.update_call(
+        "tenant-a", call["id"], target="dialing", provider="twilio", provider_call_id="CArec1"
+    )
+
+    url = "http://testserver/api/v1/telephony/twilio/status"
+    form = {
+        "CallSid": "CArec1",
+        "RecordingUrl": "https://api.twilio.com/2010-04-01/Accounts/AC/Recordings/RE1",
+        "RecordingSid": "RE1",
+        "RecordingStatus": "completed",
+    }
+    # Unsigned first: the recording callback is not a bypass.
+    bad = client.post(
+        "/api/v1/telephony/twilio/status",
+        content="CallSid=CArec1&RecordingUrl=https://x&RecordingSid=RE1&RecordingStatus=completed",
+        headers={"Content-Type": "application/x-www-form-urlencoded", "x-twilio-signature": "bogus"},
+    )
+    assert bad.status_code == 403
+
+    good = client.post(
+        "/api/v1/telephony/twilio/status",
+        content="CallSid=CArec1&RecordingUrl=https://api.twilio.com/2010-04-01/Accounts/AC/Recordings/RE1&RecordingSid=RE1&RecordingStatus=completed",
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            **_signed_form(url, form),
+        },
+    )
+    assert good.status_code == 200
+
+    updated = db.get_voice_session("tenant-a", session["id"])
+    assert updated["recording_url"].endswith("/Recordings/RE1")
+    assert updated["recording_sid"] == "RE1"
+    events = db.list_voice_session_events("tenant-a", session["id"])
+    ready = [e for e in events if e["event_type"] == "recording.ready"]
+    assert ready and ready[0]["data"]["recording_sid"] == "RE1"
+    # The recording.ready event is dispatched to the contract consumer.
+    dispatched_types = [
+        json.loads(r["records"][0]["body"])["event_type"]
+        for r in fake_pyreverseetl_transport.requests
+    ]
+    assert "recording.ready" in dispatched_types
+
+
+def test_recording_callback_for_unknown_call_is_404(settings, client) -> None:
+    settings = _configured(settings)
+    client.app.state.settings = settings
+    _twilio_adapter(client, live=False)
+    url = "http://testserver/api/v1/telephony/twilio/status"
+    form = {"CallSid": "CA-nobody", "RecordingUrl": "https://x", "RecordingStatus": "completed"}
+    response = client.post(
+        "/api/v1/telephony/twilio/status",
+        content="CallSid=CA-nobody&RecordingUrl=https://x&RecordingStatus=completed",
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            **_signed_form(url, form),
+        },
+    )
+    assert response.status_code == 404

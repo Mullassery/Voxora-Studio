@@ -228,6 +228,8 @@ CREATE TABLE IF NOT EXISTS voice_sessions (
     transcript TEXT NOT NULL DEFAULT '[]',
     provider TEXT NOT NULL DEFAULT 'mock',
     simulated INTEGER NOT NULL DEFAULT 1,
+    recording_url TEXT,
+    recording_sid TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE(tenant_id, external_application, external_session_id)
@@ -392,6 +394,18 @@ class Database:
         with self._write() as connection:
             connection.executescript(SCHEMA)
             self._migrate_campaigns(connection)
+            self._migrate_voice_sessions(connection)
+
+    @staticmethod
+    def _migrate_voice_sessions(connection: sqlite3.Connection) -> None:
+        """Idempotent column additions for databases created before recordings."""
+        existing = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(voice_sessions)").fetchall()
+        }
+        for column in ("recording_url", "recording_sid"):
+            if column not in existing:
+                connection.execute(f"ALTER TABLE voice_sessions ADD COLUMN {column} TEXT")
 
     @staticmethod
     def _migrate_campaigns(connection: sqlite3.Connection) -> None:
@@ -757,6 +771,8 @@ class Database:
             "provider",
             "simulated",
             "webhook_url",
+            "recording_url",
+            "recording_sid",
         }
         updates = [(key, value) for key, value in fields.items() if key in allowed]
         if not updates:
