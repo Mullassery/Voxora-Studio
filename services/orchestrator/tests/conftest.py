@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import sys
+import types
 from pathlib import Path
 from typing import Iterator
 
@@ -69,6 +71,9 @@ def settings(tmp_path: Path) -> Settings:
         env="test",
         database_path=str(tmp_path / "test.db"),
         secret_key="unit-test-secret-key-must-be-32-chars",
+        outbound_webhook_secret="unit-test-outbound-webhook-secret-0123456789",
+        webhook_transport="pyreverseetl",
+        webhook_dead_letter_path=str(tmp_path / "webhook-dead-letter.jsonl"),
         api_tokens={
             "admin-token": TenantPrincipal("tenant-a", "admin", "Admin"),
             "operator-token": TenantPrincipal("tenant-a", "operator", "Operator"),
@@ -82,6 +87,60 @@ def settings(tmp_path: Path) -> Settings:
         worker_threads=1,
         global_concurrency=5,
     )
+
+
+class _FakePyReverseETL(types.ModuleType):
+    """Hermetic stand-in for pyreverseetl.connectors in the dispatch path.
+
+    Records every (config, records) write so tests can assert the signed
+    envelope contract without live HTTP; every delivery succeeds unless a
+    test overrides ``failures_remaining``.
+    """
+
+    requests: list = []
+    failures_remaining = 0
+
+    class BaseConnector:  # minimal surface for the inline source class
+        name = "inline"
+
+    class ConnectorError(RuntimeError):
+        pass
+
+    class WebhookConnector:
+        name = "webhook"
+
+        def write(self, config, rows):
+            if _FakePyReverseETL.failures_remaining > 0:
+                _FakePyReverseETL.failures_remaining -= 1
+                return 0
+            _FakePyReverseETL.requests.append(
+                {"config": dict(config), "records": [dict(row) for row in rows]}
+            )
+            return len(rows)
+
+    @staticmethod
+    def run_with_connector(source, source_config, destination, destination_config):
+        rows = source.read(source_config)
+        written = destination.write(destination_config, rows)
+
+        class _Result:
+            run_id = "fake-run"
+            rows_written = written
+            rows_failed = max(0, len(rows) - written)
+
+        return _Result()
+
+
+@pytest.fixture(autouse=True)
+def fake_pyreverseetl_transport(monkeypatch: pytest.MonkeyPatch):
+    """Route webhook dispatch through the fake transport; never hit the network."""
+    _FakePyReverseETL.requests = []
+    _FakePyReverseETL.failures_remaining = 0
+    fake_module = types.ModuleType("pyreverseetl.connectors")
+    for name in ("BaseConnector", "ConnectorError", "WebhookConnector", "run_with_connector"):
+        setattr(fake_module, name, getattr(_FakePyReverseETL, name))
+    monkeypatch.setitem(sys.modules, "pyreverseetl.connectors", fake_module)
+    return _FakePyReverseETL
 
 
 @pytest.fixture

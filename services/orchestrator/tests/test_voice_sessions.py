@@ -13,6 +13,8 @@ import typing
 
 from fastapi.testclient import TestClient
 
+from voxora.db import Database
+
 if typing.TYPE_CHECKING:  # pragma: no cover
     from typing import Any, Dict, List
 
@@ -299,3 +301,158 @@ def test_webhook_delivery_signs_and_records_attempts(client: TestClient) -> None
         assert (signature or "").startswith("v1=")
         deliveries = db.list_event_deliveries("t1", body[0]["data"]["event_id"])
         assert deliveries and deliveries[0]["ok"] in (True, 1)
+
+
+# ------------------------------------------------- PyReverseETL transport (M5)
+
+
+def _seed_completed_session(db) -> "Dict[str, Any]":
+    agent = db.create_agent("t1", {"name": "A"})
+    contact = db.create_local_contact(
+        "t1", {"first_name": "C", "phone": "+15551234600", "consent_state": "granted"}
+    )
+    return db.create_voice_session(
+        "t1",
+        {
+            "external_application": "pyinterviewbot",
+            "external_session_id": "pret_001",
+            "agent_id": agent["id"],
+            "contact_id": contact["id"],
+            "status": "completed",
+            "webhook_url": "https://consumer.example.com/wh",
+        },
+    )
+
+
+def test_pyreverseetl_transport_signs_envelope_and_records_deliveries() -> None:
+    import tempfile
+    from pathlib import Path
+
+    from voxora.voice_sessions import (
+        dispatch_session_events_via_pyreverseetl,
+        signed_envelope_body,
+    )
+
+    captured: "List[Dict[str, Any]]" = []
+
+    def fake_sync(source, source_config, destination_type, destination_config):
+        captured.append(
+            {"records": source.read(source_config), "config": dict(destination_config)}
+        )
+
+        class _Result:
+            run_id = "run-1"
+            rows_written = 1
+            rows_failed = 0
+
+        return _Result()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Database(str(Path(tmp) / "unit.db"))
+        db.initialize()
+        db.ensure_tenant("t1", "T")
+        session = _seed_completed_session(db)
+        db.record_voice_session_event("t1", session["id"], "voice_session.completed", {})
+        outcomes = dispatch_session_events_via_pyreverseetl(
+            db, "t1", session["id"], "https://consumer.example.com/wh",
+            "unit-test-outbound-webhook-secret-0123456",
+            dead_letter_path=str(Path(tmp) / "dl.jsonl"),
+            sync_fn=fake_sync,
+        )
+        assert outcomes == [1]
+        call = captured[0]
+        assert call["config"]["signature_header"] == "x-voxora-signature"
+        assert call["config"]["body_field"] == "body"
+        record = call["records"][0]
+        envelope = json.loads(record["body"])
+        assert envelope["event_type"] == "voice_session.completed"
+        assert envelope["external_application"] == "pyinterviewbot"
+        # Signature is exactly what Voxora computed over the exact body bytes.
+        assert record["signature"] == signed_envelope_body(envelope, "unit-test-outbound-webhook-secret-0123456")[1]
+        deliveries = db.list_event_deliveries("t1", envelope["event_id"])
+        assert deliveries and deliveries[-1]["ok"] == 1
+        assert "pyreverseetl run run-1" in (deliveries[-1]["detail"] or "")
+
+
+def test_pyreverseetl_replay_carries_byte_identical_signature() -> None:
+    import tempfile
+    from pathlib import Path
+
+    from voxora.voice_sessions import dispatch_session_events_via_pyreverseetl
+
+    fail_next = {"value": True}
+
+    def fake_sync(source, source_config, destination_type, destination_config):
+        records = source.read(source_config)
+        if fail_next["value"]:
+            fail_next["value"] = False
+
+            class _Fail:
+                run_id = "run-fail"
+                rows_written = 0
+                rows_failed = 1
+
+            return _Fail()
+
+        class _Ok:
+            run_id = "run-ok"
+            rows_written = len(records)
+            rows_failed = 0
+
+        return _Ok()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Database(str(Path(tmp) / "unit.db"))
+        db.initialize()
+        db.ensure_tenant("t1", "T")
+        session = _seed_completed_session(db)
+        db.record_voice_session_event("t1", session["id"], "voice_session.completed", {})
+        for _ in range(2):
+            dispatch_session_events_via_pyreverseetl(
+                db, "t1", session["id"], "https://consumer.example.com/wh",
+                "unit-test-outbound-webhook-secret-0123456",
+                dead_letter_path=str(Path(tmp) / "dl.jsonl"),
+                sync_fn=fake_sync,
+            )
+        events = db.list_voice_session_events("t1", session["id"])
+        deliveries = db.list_event_deliveries("t1", events[0]["id"])
+        assert [d["ok"] for d in deliveries] == [0, 1]
+        envelope = {
+            "event_id": events[0]["id"],
+            "event_type": events[0]["event_type"],
+            "event_version": events[0].get("event_version", "1.0"),
+            "occurred_at": events[0]["occurred_at"],
+            "session_id": session["id"],
+            "external_application": "pyinterviewbot",
+            "external_session_id": "pret_001",
+            "data": {},
+        }
+    # Replay after failure: the envelope is rebuilt deterministically, so the
+    # consumer sees a byte-identical body and signature.
+    from voxora.voice_sessions import signed_envelope_body
+
+    body, signature = signed_envelope_body(
+        envelope,
+        "unit-test-outbound-webhook-secret-0123456",
+    )
+    assert signature.startswith("v1=")
+    json.loads(body.decode())  # the delivered body is valid JSON bytes
+
+
+def test_webhook_dispatch_is_wired_into_session_creation(client, fake_pyreverseetl_transport) -> None:
+    agent_id = _seed_agent(client)
+    _grant_consent(client, "+15551234567")
+    response = client.post(
+        "/api/v1/voice-sessions",
+        json=_session_payload(agent_id, external_session_id="wired_001", webhook_url="https://consumer.example.com/wh"),
+        headers=HEADERS,
+    )
+    assert response.status_code == 201, response.text
+    dispatched = fake_pyreverseetl_transport.requests
+    assert dispatched, "session creation must dispatch recorded events"
+    event_types = [json.loads(r["records"][0]["body"])["event_type"] for r in dispatched]
+    assert "voice_session.created" in event_types
+    assert "voice_session.queued" in event_types
+    for request in dispatched:
+        assert request["config"]["signature_header"] == "x-voxora-signature"
+        assert request["records"][0]["signature"].startswith("v1=")

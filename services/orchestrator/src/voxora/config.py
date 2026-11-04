@@ -57,6 +57,10 @@ class Settings:
     database_url: Optional[str] = None
     secret_key: str = "development-only-secret-key-change-me"
     outbound_webhook_secret: str = "development-only-outbound-webhook-secret-0123456"
+    webhook_transport: str = "direct"
+    webhook_dead_letter_path: Optional[str] = None
+    webhook_max_attempts: int = 3
+    webhook_timeout_secs: float = 10.0
     api_tokens: Dict[str, TenantPrincipal] = field(default_factory=lambda: dict(DEFAULT_TOKENS))
     cors_origins: List[str] = field(
         default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"]
@@ -112,6 +116,10 @@ class Settings:
                 "VOXORA_OUTBOUND_WEBHOOK_SECRET",
                 "development-only-outbound-webhook-secret-0123456",
             ),
+            webhook_transport=os.getenv("VOXORA_WEBHOOK_TRANSPORT", "direct").strip().lower(),
+            webhook_dead_letter_path=os.getenv("VOXORA_WEBHOOK_DEAD_LETTER_PATH") or None,
+            webhook_max_attempts=_int(os.getenv("VOXORA_WEBHOOK_MAX_ATTEMPTS"), 3),
+            webhook_timeout_secs=_float(os.getenv("VOXORA_WEBHOOK_TIMEOUT_SECS"), 10.0),
             api_tokens=tokens,
             cors_origins=origins,
             seed_demo=_bool(os.getenv("VOXORA_SEED_DEMO"), True),
@@ -156,6 +164,26 @@ class Settings:
             )
         if len(self.outbound_webhook_secret) < 32:
             raise ValueError("VOXORA_OUTBOUND_WEBHOOK_SECRET must be at least 32 characters")
+        if self.webhook_transport not in ("direct", "pyreverseetl"):
+            raise ValueError(
+                "VOXORA_WEBHOOK_TRANSPORT must be 'direct' or 'pyreverseetl',"
+                f" got {self.webhook_transport!r}"
+            )
+        if self.webhook_transport == "pyreverseetl":
+            try:
+                import pyreverseetl  # noqa: F401 - availability check, fail closed at startup
+            except ImportError as error:
+                raise ValueError(
+                    "VOXORA_WEBHOOK_TRANSPORT=pyreverseetl requires the pyreverseetl"
+                    " package (pip install pyreverseetl)"
+                ) from error
+            if not self.webhook_dead_letter_path:
+                raise ValueError(
+                    "VOXORA_WEBHOOK_TRANSPORT=pyreverseetl requires"
+                    " VOXORA_WEBHOOK_DEAD_LETTER_PATH (dead-lettering is the point)"
+                )
+        if self.webhook_max_attempts < 1:
+            raise ValueError("VOXORA_WEBHOOK_MAX_ATTEMPTS must be >= 1")
         if self.telephony_provider == "twilio":
             missing = [
                 name

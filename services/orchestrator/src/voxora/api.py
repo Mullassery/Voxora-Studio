@@ -211,6 +211,7 @@ async def lifespan(app: FastAPI):
         from_number=settings.twilio_from_number if settings.allow_live_calls else None,
         worker_threads=settings.worker_threads,
         global_concurrency=settings.global_concurrency,
+        settings=settings,
     )
     app.state.worker = None
     if settings.worker_enabled:
@@ -735,6 +736,9 @@ def create_app(
         app.state.db.record_voice_session_event(
             tenant_id, session["id"], "voice_session.queued", {"call_id": call["id"]}
         )
+        from .voice_sessions import dispatch_pending_webhooks
+
+        dispatch_pending_webhooks(app.state.db, app.state.settings, tenant_id, session["id"])
         from .campaign import CampaignEngine
 
         engine = app.state.engine
@@ -775,6 +779,13 @@ def create_app(
                 bool(result.ok),
                 {"simulated": bool(result.simulated), "transcript_available": bool(result.transcript)},
             )
+            voice_session = app.state.db.get_voice_session_by_call(tenant_id, call["id"])
+            if voice_session is not None:
+                from .voice_sessions import dispatch_pending_webhooks
+
+                dispatch_pending_webhooks(
+                    app.state.db, app.state.settings, tenant_id, voice_session["id"]
+                )
             session = app.state.db.get_voice_session(tenant_id, session["id"]) or session
         else:
             session = app.state.db.update_voice_session(
@@ -832,6 +843,11 @@ def create_app(
             session_id,
             "voice_session.terminated",
             {"by": principal.name, "canceled_via_provider": canceled_via_provider},
+        )
+        from .voice_sessions import dispatch_pending_webhooks
+
+        dispatch_pending_webhooks(
+            app.state.db, app.state.settings, principal.tenant_id, session_id
         )
         return _voice_session_view(app, principal, session)
 
