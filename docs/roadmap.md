@@ -39,14 +39,16 @@ Deliberately ordered so that every step ends in something runnable and testable.
 - [ ] Rate limiting + quota per tenant; token rotation endpoint; operator audit export.
 - [ ] Observability: Prometheus metrics endpoint next to the JSON logs; call latency dashboards off the existing `call_latency` data.
 
-## M5 — Make the integration contracts real (P0)
+## M5 — Make the integration contracts real (P0) — COMPLETE 2026-11-04
+
+Shipped: `bf40ed7` (defects V1–V3 + /ai/decide route tests), `e4c81c1` (PyReverseETL transport + production dispatch wiring), `72f69d9` (recording callbacks). Requires PyReverseETL >= 3.6.0 (PyPI: extra_headers + WebhookConnector).
 
 Every ADR-0003 promise must have a production call path, not just a test
 harness. Pattern provenance (P-ids) is held in the internal ecosystem research
 dossier (kept separately from both product repos); nothing below names other
 products.
 
-- [ ] **Webhook delivery moves to the PyReverseETL transport (P1).**
+- [x] **Webhook delivery moves to the PyReverseETL transport (P1).**
   `dispatch_session_events`/`deliver_webhook` today run bounded single-pass
   (max 3 attempts, no backoff, no dead-letter, no replay) and are invoked by
   nothing outside tests. Per the ecosystem ownership rule, queue buffering,
@@ -64,7 +66,7 @@ products.
   signature. Tests: enqueue idempotence + signature stability across replay
   in-repo; transport behavior verified against a running PyReverseETL sync
   (live, not mocked).
-- [ ] **Ship the three verified defects** (audit 2026-11-04) that block
+- [x] **Ship the three verified defects** (audit 2026-11-04) that block
   contract consumers: (a) `OpenRouterAgent`/`OpenRouterLLM` construct
   `httpx.AsyncClient` but call it synchronously → `/api/v1/ai/decide`
   500s under `VOXORA_LLM_PROVIDER=openrouter` (reproduce in test, fix to
@@ -74,10 +76,10 @@ products.
   `test_voice_sessions.py`); (c) structured-log formatter drops standard
   `extra=` fields (`observability.py` promotes only `_`-prefixed keys) —
   fix promotion, assert log content in a test.
-- [ ] **`/api/v1/ai/decide` route tests** (zero coverage today): mock path
+- [x] **`/api/v1/ai/decide` route tests** (zero coverage today): mock path
   determinism + audit row, openrouter-unconfigured 501, openrouter-unavailable
   503, usage in response.
-- [ ] **Recording callbacks (P2, differentiator: no reference implements
+- [x] **Recording callbacks (P2, differentiator: no reference implements
   telephony at all).** Twilio `RecordingUrl`/`CallEnded` recording callbacks →
   store recording reference on the call; emit `recording.ready`; downstream
   report consumers read recordings via the outbound contract only — the
