@@ -38,3 +38,144 @@ Deliberately ordered so that every step ends in something runnable and testable.
 - [ ] Multi-worker safety: SQLite locks become Postgres advisory locks; campaign claims move to `SELECT … FOR UPDATE SKIP LOCKED`.
 - [ ] Rate limiting + quota per tenant; token rotation endpoint; operator audit export.
 - [ ] Observability: Prometheus metrics endpoint next to the JSON logs; call latency dashboards off the existing `call_latency` data.
+
+## M5 — Make the integration contracts real (P0)
+
+Every ADR-0003 promise must have a production call path, not just a test
+harness. Pattern provenance (P-ids) is held in the internal ecosystem research
+dossier (kept separately from both product repos); nothing below names other
+products.
+
+- [ ] **Webhook delivery moves to the PyReverseETL transport (P1).**
+  `dispatch_session_events`/`deliver_webhook` today run bounded single-pass
+  (max 3 attempts, no backoff, no dead-letter, no replay) and are invoked by
+  nothing outside tests. Per the ecosystem ownership rule, queue buffering,
+  backpressure, dead-lettering, and replay are **delegated to PyReverseETL**
+  — its webhook destination (real auth), retry-with-backoff, idempotency
+  ledger for crash-mid-batch recovery, and lineage edges are exactly this
+  contract; do not rebuild a dead-letter state machine in-repo. Voxora
+  enqueues the signed envelope (HMAC signing stays Voxora-side: the signing
+  secret never leaves this repo), PyReverseETL owns retry / backoff /
+  dead-letter / replay and records delivery lineage; `voice_session_deliveries`
+  rows remain the Voxora-side audit trail of enqueue + terminal state.
+  Acceptance: kill the receiver mid-batch; PyReverseETL retries with backoff,
+  dead-letters terminal failures, and replays them; every enqueue/replay
+  appends a delivery row and a lineage edge; replays carry a byte-identical
+  signature. Tests: enqueue idempotence + signature stability across replay
+  in-repo; transport behavior verified against a running PyReverseETL sync
+  (live, not mocked).
+- [ ] **Ship the three verified defects** (audit 2026-11-04) that block
+  contract consumers: (a) `OpenRouterAgent`/`OpenRouterLLM` construct
+  `httpx.AsyncClient` but call it synchronously → `/api/v1/ai/decide`
+  500s under `VOXORA_LLM_PROVIDER=openrouter` (reproduce in test, fix to
+  injectable sync `httpx.Client` default); (b) voice-session `transcript`
+  stored as TEXT outside `JSON_COLUMNS` → transcript endpoint returns a JSON
+  *string*, not an array (add strict `entries` array assertion to
+  `test_voice_sessions.py`); (c) structured-log formatter drops standard
+  `extra=` fields (`observability.py` promotes only `_`-prefixed keys) —
+  fix promotion, assert log content in a test.
+- [ ] **`/api/v1/ai/decide` route tests** (zero coverage today): mock path
+  determinism + audit row, openrouter-unconfigured 501, openrouter-unavailable
+  503, usage in response.
+- [ ] **Recording callbacks (P2, differentiator: no reference implements
+  telephony at all).** Twilio `RecordingUrl`/`CallEnded` recording callbacks →
+  store recording reference on the call; emit `recording.ready`; downstream
+  report consumers read recordings via the outbound contract only — the
+  media path stays closed to them (reference only).
+  Acceptance: seeded dry-run recording callback settles call with recording
+  pointer + event; unsigned callback rejected.
+
+## M6 — Real-time media bridge (P1, extends M3's open media item)
+
+The turn machine exists; this milestone gives it real audio, adopting four
+verified patterns from competing browser-voice implementations (P3–P6):
+
+- [ ] **Twilio Media Streams WebSocket backend in `voice-runtime` (Rust):**
+  `<Connect><Stream>` bidirectional audio; μ-law 8kHz ↔ 16k PCM converter
+  registry + format negotiation modeled on a competing implementation's
+  PCM-native engine (P3): ring buffer, jitter-tolerant chunk pool, latency
+  tracker per hop. Acceptance: scripted end-to-end test rides a fake media WS:
+  100 injected μ-law frames produce one utterance ⭢ decision ⭢ TTS frames out;
+  per-hop latency counters non-zero. Legal/carrier review gate first (M3
+  decision gate stands).
+- [ ] **Echo-safe barge-in decision function (P4).** Adopt the pure,
+  unit-testable decision curve (echo cooldown window + RMS threshold across
+  N frames + minimum elapsed TTS time) as the Rust-side barge-in gate instead
+  of raw VAD energy only; keep the existing barge-in in-guards as the state
+  machine layer. Acceptance: table-driven tests proving playback echo cannot
+  self-trigger and candidate speech ≥ threshold with ≥3 frames does.
+- [ ] **Transcribed-word-gated interruption (P5).** Barge-in confirmed only
+  after N transcribed words from STT (not bare VAD onset), so door slams and
+  music don't kill a question — competing implementation verified value N=3.
+  Acceptance: frames-only noise → no interruption; partial ASR words →
+  interrupt after N.
+- [ ] **In-flight session checkpointing + restart recovery (P6).** Off the
+  turn-critical path, flush a transcript checkpoint every ~20 s (bounded
+  queue; ≥2.5× heartbeat while dialing); on worker restart, recover answers
+  the agent failed to persist by re-reading the verbatim transcript
+  snapshot with a substance gate (short junk discarded, terminally-recovered
+  answers marked `source: "recovered"`). Acceptance: kill -9 the worker
+  mid-session; restarted session shows ≤1 flush interval of loss, recovered
+  answers present and scored, provenance tagged. Tests cover corruption,
+  empty and boundary cases.
+- [ ] **Session cost guards.** Hard per-session ceilings (config: max
+  duration, max turns, token budget) enforced in the voice session engine;
+  breach ⇒ orderly terminate with `voice_session.terminated` reason
+  `budget_exhausted`; usage persisted (see M7). Matches competing 20-min/
+  80-turn guardrails but implemented Voxora-side where sole-writer state lives.
+
+## M7 — Live turn loop + model routing (P1)
+
+Closes the audit finding that the AI layer currently never participates in a
+live call (TwiML `<Say>` from the static prompt only).
+
+- [ ] **Real STT/TTS chain inside the live session** (M3 open item): streaming
+  STT → OpenRouterAgent turn → streamed TTS, replacing the single-shot Say.
+  Mid-call `instructions` (already persisted, now capability-honest 409)
+  become actionable: scheduler-injected text is spoken at the stream boundary.
+  Acceptance: simulated live session with agent answering; instruction inject
+  mid-session flips spoken content; `mid_call_instructions` capability flips
+  to True for the media backend only.
+- [ ] **STT/TTS provider routing table (P7).** Configurable per-language
+  chain (primary → fallback per language + `mixed` code-switching), each
+  adapter carrying capability metadata + a **verified-quirks registry**
+  (competing implementation documents exact per-language provider failures
+  with dates — adopt the honesty pattern: unverified combinations are labeled
+  UNVERIFIED in status output, never silently attempted).
+- [ ] **Real model_profile dispatch (P8).** `agent.model_profile` currently
+  recorded but routed by env only. Add a model profile table (existing
+  `agents.model_profile` seed) dispatching per task: interview-turn model vs
+  summarize/analyze model; `/api/v1/ai/decide` honors the profile; unknown
+  profile ⇒ 501 with configured list. Usage/cost rows persist per
+  (tenant, profile, model) — audits the interview's token economics and
+  keeps a per-session cost ceiling meaningful (M6 budgets).
+- [ ] **Server-authoritative TTS only (P9).** Live synthesis takes text from
+  the agent/state machine (or approved instruction store); expose no
+  client-controlled arbitrary-text endpoint (pattern provenance: competing
+  practice tool proxies TTS question-by-index server-side).
+
+## M8 — Integrity signals (P2)
+
+- [ ] **Speech-analytics metadata per call/report (P10).** Cheap ffmpeg-based
+  pause count / words-per-minute / filler-word estimates computed once per
+  finalized transcript and stored on the session; exposed via the outbound
+  contract for downstream report consumers (report ownership stays with the
+  interview layer — this repo only computes and exposes the signals).
+  Acceptance: seeded fixture produces deterministic estimates;
+  absent audio ⇒ field omitted, never zero-fabricated.
+- [ ] **Candidate-consent voice cloning / identity checks stay out of scope**
+  unless record consents explicitly classify allowed models.
+
+## Explicit non-goals (patterns rejected from competitor adoption)
+
+- Per-session question randomization as the *sole* adaptivity mechanism
+  (temperature + random prompt "angles"): fine for candidate practice tools,
+  contradicts cross-candidate comparability that registered screening
+  requires; evidence templates + rubrics stay the spread-control mechanism.
+- Video-avatar interviewer rendering: reference packaging exists but all
+  avatar assets are placeholders 404ing by design; watch, don't build.
+- In-browser practice-mode gamification: belongs to candidate-side products,
+  not assessment infrastructure.
+- PTT desktop-audio drivers (reference's unique but unmotivated piece given
+  our PSTN-first posture).
+
