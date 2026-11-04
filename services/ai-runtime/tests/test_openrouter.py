@@ -225,3 +225,63 @@ def test_provider_selection_is_explicit_and_fail_closed(monkeypatch: pytest.Monk
     assert "OPENROUTER_API_KEY" in str(fail_closed.value)
     with pytest.raises(ValueError):
         create_agent_from_env({"VOXORA_LLM_PROVIDER": "gpt4-turbo"})
+
+
+# ---------------------------------------------------------------------------
+# Regression (audit 2026-11-04, V1): the default transport must be the
+# synchronous `httpx.Client`. Voxora's agent/decide contract is synchronous;
+# an AsyncClient default returned unawaited coroutines and crashed every
+# default-constructor call path (e.g. `/api/v1/ai/decide` 500s).
+
+
+def _default_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-secret")
+    monkeypatch.setenv("OPENROUTER_MODEL", "anthropic/claude-3.5-sonnet")
+
+
+def test_default_transport_is_synchronous_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    _default_env(monkeypatch)
+    agent = OpenRouterAgent()
+    assert isinstance(agent._client, httpx.Client)
+    assert not isinstance(agent._client, httpx.AsyncClient)
+
+    from voxora_ai.openrouter import OpenRouterLLM
+
+    llm = OpenRouterLLM()
+    assert isinstance(llm._client, httpx.Client)
+    assert not isinstance(llm._client, httpx.AsyncClient)
+
+
+def test_llm_decide_round_trip_pins_route_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    from voxora_ai.openrouter import OpenRouterLLM
+
+    captured: Dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["auth"] = request.headers.get("authorization")
+        captured["body"] = json.loads(request.read())
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": json.dumps({"next_action": "probe"})}}],
+                "usage": {"prompt_tokens": 30, "completion_tokens": 12, "total_tokens": 42, "cost": "0.0007"},
+            },
+        )
+
+    llm = OpenRouterLLM(
+        api_key="sk-or-secret",
+        model="anthropic/claude-3.5-sonnet",
+        client=httpx.Client(transport=httpx.MockTransport(handler), base_url=DEFAULT_BASE_URL),
+    )
+    decision = llm.decide("system prompt", "user prompt", temperature=0.2)
+    assert decision == {"next_action": "probe"}
+    assert captured["path"] == "/api/v1/chat/completions"
+    assert captured["auth"] == "Bearer sk-or-secret"
+    assert captured["body"]["messages"][0] == {"role": "system", "content": "system prompt"}
+    assert captured["body"]["messages"][1] == {"role": "user", "content": "user prompt"}
+    assert captured["body"]["usage"] == {"include": True}
+    assert captured["body"]["response_format"] == {"type": "json_object"}
+    assert captured["body"]["temperature"] == 0.2
+    usage = llm.usage_report()
+    assert usage["total_tokens"] == 42.0 and usage["cost_usd"] == 0.0007

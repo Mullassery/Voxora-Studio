@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from typing import List
 
+import pytest
+from fastapi.testclient import TestClient
+
+from voxora.api import create_app
+from voxora.config import Settings, TenantPrincipal
 from voxora.crm.base import (
     CanonicalContact,
     ConnectionTest,
@@ -290,3 +295,119 @@ def test_audit_log_records_promotions(client) -> None:
     actions = [item["action"] for item in audit]
     assert "campaign.created" in actions
     assert "campaign.started" in actions
+
+
+# ------------------------------------------------------------- /api/v1/ai/decide
+# Route coverage (audit 2026-11-04: zero coverage). The live OpenRouter
+# service is out of scope; the provider path is exercised with injected
+# doubles at the OpenRouterLLM boundary.
+
+
+def _decide_payload() -> dict:
+    return {"system_prompt": "You are an interviewer.", "user_prompt": "Assess the reply."}
+
+
+def test_ai_decide_mock_path_is_deterministic_and_audited(client) -> None:
+    first = client.post("/api/v1/ai/decide", json=_decide_payload(), headers=AUTH)
+    assert first.status_code == 200, first.text
+    second = client.post("/api/v1/ai/decide", json=_decide_payload(), headers=AUTH)
+    body_one, body_two = first.json(), second.json()
+    assert body_one["source"] == "mock-llm"
+    assert body_one["decision"] == body_two["decision"]  # deterministic mock
+    assert body_one["recorded_usage"] == {
+        "prompt_tokens": 0.0,
+        "completion_tokens": 0.0,
+        "total_tokens": 0.0,
+        "cost_usd": 0.0,
+    }
+    audit = client.get("/api/v1/audit", headers=AUTH).json()["data"]
+    decide_rows = [row for row in audit if row["action"] == "ai.decide"]
+    assert decide_rows and decide_rows[0]["metadata"]["provider"] == "mock"
+
+
+def test_ai_decide_rejects_non_writer(client) -> None:
+    response = client.post("/api/v1/ai/decide", json=_decide_payload(), headers=VIEWER)
+    assert response.status_code == 403
+
+
+def _openrouter_client(monkeypatch: pytest.MonkeyPatch, tmp_path, *, api_key: str | None) -> TestClient:
+    """App with llm_provider=openrouter; env controls OpenRouterLLM creds."""
+    monkeypatch.setenv("VOXORA_LLM_PROVIDER", "openrouter")
+    if api_key is None:
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        monkeypatch.delenv("OPENROUTER_MODEL", raising=False)
+    else:
+        monkeypatch.setenv("OPENROUTER_API_KEY", api_key)
+        monkeypatch.setenv("OPENROUTER_MODEL", "test/model")
+    settings = Settings(
+        env="test",
+        database_path=str(tmp_path / "openrouter.db"),
+        secret_key="unit-test-secret-key-must-be-32-chars",
+        api_tokens={"admin-token": TenantPrincipal("tenant-a", "admin", "Admin")},
+        cors_origins=["http://localhost:5173"],
+        worker_enabled=False,
+        simulated_call_delay_seconds=0.0,
+        llm_provider="openrouter",
+    )
+    return TestClient(create_app(settings))
+
+
+def test_ai_decide_openrouter_unconfigured_is_501(
+    client, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    pytest.importorskip("voxora_ai")
+    with _openrouter_client(monkeypatch, tmp_path, api_key=None) as scoped:
+        response = scoped.post("/api/v1/ai/decide", json=_decide_payload(), headers=AUTH)
+    assert response.status_code == 501
+    body = response.json()
+    assert body["error"]["code"] == "llm_provider_unconfigured"
+
+
+def test_ai_decide_openrouter_unavailable_is_503(
+    client, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    pytest.importorskip("voxora_ai")
+    from voxora_ai.openrouter import OpenRouterError, OpenRouterLLM
+
+    def explode(self, *args: object, **kwargs: object) -> dict:
+        raise OpenRouterError("transport failure: connection refused", retryable=True)
+
+    monkeypatch.setattr(OpenRouterLLM, "decide", explode)
+    with _openrouter_client(monkeypatch, tmp_path, api_key="sk-or-secret") as scoped:
+        response = scoped.post("/api/v1/ai/decide", json=_decide_payload(), headers=AUTH)
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "llm_unavailable"
+
+
+def test_ai_decide_openrouter_success_records_provider_and_usage(
+    client, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    pytest.importorskip("voxora_ai")
+    from voxora_ai.openrouter import OpenRouterLLM
+
+    captured: dict = {}
+
+    def decide(self, system_prompt: str, user_prompt: str, **kwargs: object) -> dict:
+        captured["prompts"] = (system_prompt, user_prompt)
+        return {"next_action": "probe", "is_complete": False}
+
+    monkeypatch.setattr(OpenRouterLLM, "decide", decide)
+    monkeypatch.setattr(
+        OpenRouterLLM,
+        "usage_report",
+        lambda self: {"prompt_tokens": 30.0, "completion_tokens": 12.0, "total_tokens": 42.0, "cost_usd": 0.0007},
+    )
+    with _openrouter_client(monkeypatch, tmp_path, api_key="sk-or-secret") as scoped:
+        response = scoped.post(
+            "/api/v1/ai/decide", json={**_decide_payload(), "model_profile": "interview_default"}, headers=AUTH
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["source"] == "openrouter"
+    assert body["decision"] == {"next_action": "probe", "is_complete": False}
+    assert body["recorded_usage"]["cost_usd"] == 0.0007
+    assert captured["prompts"] == ("You are an interviewer.", "Assess the reply.")
+    audit = scoped.get("/api/v1/audit", headers=AUTH).json()["data"]
+    decide_rows = [row for row in audit if row["action"] == "ai.decide"]
+    assert decide_rows[0]["metadata"]["provider"] == "openrouter"
+    assert decide_rows[0]["metadata"]["model_profile"] == "interview_default"

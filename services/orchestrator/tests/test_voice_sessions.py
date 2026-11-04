@@ -82,6 +82,11 @@ def test_session_creates_call_completes_simulated_and_records_envelope_events(
         f"/api/v1/voice-sessions/{body['session_id']}/transcript", headers=HEADERS
     ).json()
     assert transcript["transcript_available"] is True and transcript["entries"]
+    # Strict shape (audit V2): entries must decode to a real JSON array of
+    # objects — a JSON-encoded *string* here is the regression the transcript
+    # JSONB fix exists for.
+    assert isinstance(transcript["entries"], list), type(transcript["entries"])
+    assert all(isinstance(entry, dict) for entry in transcript["entries"])
 
 
 def test_session_intake_is_idempotent_on_external_id(client: TestClient) -> None:

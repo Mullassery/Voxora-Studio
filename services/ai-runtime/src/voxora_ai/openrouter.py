@@ -33,6 +33,9 @@ DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 
 _END_KEYWORDS = ("goodbye", "bye", "stop calling", "end call")
 
+# Statuses worth retrying: timeout/conflict/rate-limit + upstream server errors.
+_RETRYABLE_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504})
+
 
 class OpenRouterError(RuntimeError):
     def __init__(
@@ -151,7 +154,7 @@ class OpenRouterAgent:
         )
         self._site_url = site_url or os.environ.get("OPENROUTER_SITE_URL")
         self._app_name = app_name or os.environ.get("OPENROUTER_APP_NAME")
-        self._client = client or httpx.AsyncClient(base_url=self.base_url, timeout=self.timeout)
+        self._client = client or httpx.Client(base_url=self.base_url, timeout=self.timeout)
         self.brain = brain
 
         self.capabilities: Dict[str, bool] = {
@@ -380,7 +383,11 @@ class OpenRouterLLM:
         self.retry_base_delay = retry_base_delay
         self._site_url = site_url or os.environ.get("OPENROUTER_SITE_URL")
         self._app_name = app_name or os.environ.get("OPENROUTER_APP_NAME", "Voxora Studio")
-        self._client = client if client is not None else httpx.AsyncClient(
+        # Synchronous client by default: Voxora's agent contract (`start()` /
+        # `respond()` / `decide()`) is synchronous, so an AsyncClient here
+        # would return unawaited coroutines and crash every call. Inject a
+        # custom client for tests or exotic transports.
+        self._client = client if client is not None else httpx.Client(
             base_url=self.base_url, timeout=self.timeout
         )
         self._tokens = {"prompt": 0, "completion": 0, "total": 0}
@@ -473,7 +480,7 @@ class OpenRouterLLM:
             stripped = _strip_json(message if isinstance(message, str) else "")
             try:
                 data = json.loads(stripped)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as error:
                 raise OpenRouterError(
                     f"model returned non-JSON output: {stripped[:80]!r}", retryable=False
                 ) from error

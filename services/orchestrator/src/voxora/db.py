@@ -33,6 +33,8 @@ JSON_COLUMNS = {
     "errors",
     "payload",
     "latency",
+    "session_metadata",
+    "transcript",
 }
 
 
