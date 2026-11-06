@@ -92,14 +92,16 @@ products.
 The turn machine exists; this milestone gives it real audio, adopting four
 verified patterns from competing browser-voice implementations (P3–P6):
 
-- [ ] **Twilio Media Streams WebSocket backend in `voice-runtime` (Rust):**
-  `<Connect><Stream>` bidirectional audio; μ-law 8kHz ↔ 16k PCM converter
+- [x] **Twilio Media Streams WebSocket backend in `voice-runtime` (Rust):
+  audio engine delivered (f276a43).** `<Connect><Stream>` bidirectional audio;
+  μ-law 8kHz ↔ 16k PCM converter
   registry + format negotiation modeled on a competing implementation's
   PCM-native engine (P3): ring buffer, jitter-tolerant chunk pool, latency
   tracker per hop. Acceptance: scripted end-to-end test rides a fake media WS:
   100 injected μ-law frames produce one utterance ⭢ decision ⭢ TTS frames out;
-  per-hop latency counters non-zero. Legal/carrier review gate first (M3
-  decision gate stands).
+  per-hop latency counters non-zero (fake transport per acceptances; the
+  socket-backed transport mounts behind the `MediaTransport` seam in M7).
+  Legal/carrier review gate first (M3 decision gate stands).
 - [x] **Echo-safe barge-in decision function (P4).** Adopt the pure,
   unit-testable decision curve (echo cooldown window + RMS threshold across
   N frames + minimum elapsed TTS time) as the Rust-side barge-in gate instead
@@ -111,7 +113,8 @@ verified patterns from competing browser-voice implementations (P3–P6):
   music don't kill a question — competing implementation verified value N=3.
   Acceptance: frames-only noise → no interruption; partial ASR words →
   interrupt after N.
-- [ ] **In-flight session checkpointing + restart recovery (P6).** Off the
+- [x] **In-flight session checkpointing + restart recovery (P6; 8e8b05c).**
+  Off the
   turn-critical path, flush a transcript checkpoint every ~20 s (bounded
   queue; ≥2.5× heartbeat while dialing); on worker restart, recover answers
   the agent failed to persist by re-reading the verbatim transcript
@@ -120,7 +123,7 @@ verified patterns from competing browser-voice implementations (P3–P6):
   mid-session; restarted session shows ≤1 flush interval of loss, recovered
   answers present and scored, provenance tagged. Tests cover corruption,
   empty and boundary cases.
-- [ ] **Session cost guards.** Hard per-session ceilings (config: max
+- [x] **Session cost guards (77e7b65).** Hard per-session ceilings (config: max
   duration, max turns, token budget) enforced in the voice session engine;
   breach ⇒ orderly terminate with `voice_session.terminated` reason
   `budget_exhausted`; usage persisted (see M7). Matches competing 20-min/
