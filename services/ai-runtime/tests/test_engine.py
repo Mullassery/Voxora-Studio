@@ -4,11 +4,14 @@ import hashlib
 
 import pytest
 
-from voxora_ai import AgentTurnError, MockAgent
+voxora_ai = pytest.importorskip(
+    "voxora_ai",
+    reason="services/ai-runtime tests import via their own pythonpath fixture",
+)
 
 
 def test_capabilities_are_honest() -> None:
-    agent = MockAgent()
+    agent = voxora_ai.MockAgent()
     assert agent.capabilities == {
         "real_llm": False,
         "audio_mixing": False,
@@ -18,7 +21,7 @@ def test_capabilities_are_honest() -> None:
 
 
 def test_start_returns_first_script_turn() -> None:
-    agent = MockAgent()
+    agent = voxora_ai.MockAgent()
     reply = agent.start()
     assert reply.turn_index == 1
     assert reply.text.startswith("Hello, this is a simulated call")
@@ -26,13 +29,13 @@ def test_start_returns_first_script_turn() -> None:
 
 
 def test_respond_without_start_raises() -> None:
-    agent = MockAgent()
-    with pytest.raises(AgentTurnError):
+    agent = voxora_ai.MockAgent()
+    with pytest.raises(voxora_ai.AgentTurnError):
         agent.respond("hello")
 
 
 def test_script_advances_and_ends() -> None:
-    agent = MockAgent()
+    agent = voxora_ai.MockAgent()
     agent.start()
     second = agent.respond("yes")
     assert second.turn_index == 2
@@ -43,7 +46,7 @@ def test_script_advances_and_ends() -> None:
 
 
 def test_user_goodbye_ends_immediately() -> None:
-    agent = MockAgent()
+    agent = voxora_ai.MockAgent()
     agent.start()
     reply = agent.respond("please end call, goodbye")
     assert reply.ended is True
@@ -51,7 +54,7 @@ def test_user_goodbye_ends_immediately() -> None:
 
 
 def test_script_exhaustion_closes_call() -> None:
-    agent = MockAgent(script=["First turn."])
+    agent = voxora_ai.MockAgent(script=["First turn."])
     agent.start()
     reply = agent.respond("go on")
     assert reply.turn_index == 2
@@ -59,9 +62,9 @@ def test_script_exhaustion_closes_call() -> None:
 
 
 def test_latency_is_deterministic_and_hash_derived() -> None:
-    agent = MockAgent()
+    agent = voxora_ai.MockAgent()
     first = agent.start()
-    again = MockAgent().start()
+    again = voxora_ai.MockAgent().start()
     assert first.latency_simulated_ms == again.latency_simulated_ms
     digest = hashlib.sha256(first.text.encode("utf-8")).digest()
     expected = 120.0 + digest[0] % 330
