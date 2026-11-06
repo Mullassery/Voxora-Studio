@@ -288,11 +288,16 @@ class CampaignEngine:
 
             if isinstance(result, _TR):
                 status = settle_voice_session(
-                    self.db, call, result.disposition, result.ok, {"simulated": result.simulated}
+                    self.db,
+                    call,
+                    result.disposition,
+                    result.ok,
+                    {"simulated": result.simulated},
+                    settings=self.settings,
                 )
                 self._notify_session_webhooks(call)
                 return "settled" if status else "unknown_call"
-            status = settle_voice_session(self.db, call, "", False)
+            status = settle_voice_session(self.db, call, "", False, settings=self.settings)
             self._notify_session_webhooks(call)
             return "settled" if status else "unknown_campaign"
         self._apply_result(

@@ -778,6 +778,7 @@ def create_app(
                 result.disposition,
                 bool(result.ok),
                 {"simulated": bool(result.simulated), "transcript_available": bool(result.transcript)},
+                settings=app.state.settings,
             )
             voice_session = app.state.db.get_voice_session_by_call(tenant_id, call["id"])
             if voice_session is not None:
@@ -835,7 +836,7 @@ def create_app(
                     principal.tenant_id, call["id"], "canceled", data={"by": principal.name}
                 )
         if call is not None:
-            settle_voice_session(app.state.db, call, "canceled", True)
+            settle_voice_session(app.state.db, call, "canceled", True, settings=app.state.settings)
         updated = app.state.db.update_voice_session(principal.tenant_id, session_id, status="terminated")
         session = updated or session
         app.state.db.record_voice_session_event(

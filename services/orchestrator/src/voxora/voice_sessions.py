@@ -77,16 +77,27 @@ def settle_voice_session(
     disposition: str,
     ok: bool,
     result: Optional[Dict[str, Any]] = None,
+    settings: Optional[Any] = None,
 ) -> Optional[str]:
     """Terminal settle for a campaign-less voice-session call (Twilio callbacks).
 
     Keeps the sole-writer rule: only this path transitions the session after
     dialing, and every transition emits the versioned event envelope.
+
+    Budget guard mount (roadmap M6): the per-session ceilings are checked
+    here, on the sole-writer settle tick, so every settle flow (mock intake
+    completion, provider callbacks, explicit cancel) enforces them. A breach
+    orderly-terminates with `voice_session.terminated` reason
+    `budget_exhausted` instead of the disposition; M7 adds per-turn ticks.
     """
     tenant_id = call["tenant_id"]
     session = db.get_voice_session_by_call(tenant_id, call["id"])
     if session is None:
         return None
+    from .voice_session_budgets import enforce_session_budgets
+
+    if enforce_session_budgets(db, tenant_id, session["id"], settings=settings) is not None:
+        return "terminated"
     status = session_status_for(disposition, ok)
     data: Dict[str, Any] = {"status": status, "disposition": disposition}
     if result:
