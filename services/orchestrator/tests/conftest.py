@@ -31,6 +31,8 @@ _PG_TABLES = [
     "crm_sync_jobs",
     "suppression_list",
     "tenants",
+    "voice_session_checkpoints",
+    "voice_session_events",
     "webhook_events",
 ]
 

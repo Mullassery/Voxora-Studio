@@ -271,6 +271,15 @@ CREATE TABLE IF NOT EXISTS voice_session_deliveries (
     at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS voice_session_checkpoints (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    transcript TEXT NOT NULL DEFAULT '[]',
+    flushed_at TEXT NOT NULL,
+    UNIQUE(tenant_id, session_id)
+);
+
 CREATE TABLE IF NOT EXISTS crm_connections (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
@@ -893,6 +902,41 @@ class Database:
                 (tenant_id, event_id),
             ).fetchall()
         return [self._decode(row) for row in rows]
+
+    def upsert_voice_session_checkpoint(
+        self,
+        tenant_id: str,
+        session_id: str,
+        transcript: Any,
+        flushed_at: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Durable verbatim transcript checkpoint, one row per (tenant, session)."""
+        at = flushed_at or iso()
+        payload = json.dumps(transcript)
+        with self._write() as connection:
+            connection.execute(
+                "INSERT INTO voice_session_checkpoints (id, tenant_id, session_id,"
+                " transcript, flushed_at)"
+                " VALUES (?, ?, ?, ?, ?)"
+                " ON CONFLICT(tenant_id, session_id) DO UPDATE SET transcript=?,"
+                " flushed_at=?",
+                (new_id("vxc"), tenant_id, session_id, payload, at, payload, at),
+            )
+        # RETURNING-equivalent read keeps sqlite/postgres symmetry.
+        checkpoint = self.get_voice_session_checkpoint(tenant_id, session_id)
+        if checkpoint is None:  # contract: the row exists directly after the upsert
+            raise RuntimeError("voice session checkpoint row vanished after upsert")
+        return checkpoint
+
+    def get_voice_session_checkpoint(
+        self, tenant_id: str, session_id: str
+    ) -> Optional[Dict[str, Any]]:
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT * FROM voice_session_checkpoints WHERE tenant_id=? AND session_id=?",
+                (tenant_id, session_id),
+            ).fetchone()
+        return self._decode(row) if row else None
 
     # --------------------------------------------------------------- campaigns
     def create_campaign(self, tenant_id: str, values: Dict[str, Any]) -> Dict[str, Any]:

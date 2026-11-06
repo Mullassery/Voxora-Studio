@@ -81,6 +81,12 @@ class Settings:
     twilio_status_callback_url: Optional[str] = None
     max_campaign_recipients: int = 10000
     max_import_pages: int = 20
+    heartbeat_interval_seconds: float = 8.0
+    transcript_checkpoint_interval_seconds: float = 20.0
+    transcript_checkpoint_queue_size: int = 8
+    voice_session_max_duration_seconds: int = 1200
+    voice_session_max_turns: int = 80
+    voice_session_token_budget: int = 60000
     log_level: str = "INFO"
 
     @classmethod
@@ -140,6 +146,13 @@ class Settings:
             twilio_status_callback_url=os.getenv("TWILIO_STATUS_CALLBACK_URL") or None,
             max_campaign_recipients=_int(os.getenv("VOXORA_MAX_CAMPAIGN_RECIPIENTS"), 10000),
             max_import_pages=_int(os.getenv("VOXORA_MAX_IMPORT_PAGES"), 20),
+            heartbeat_interval_seconds=_float(os.getenv("VOXORA_HEARTBEAT_INTERVAL_SECONDS"), 8.0),
+            transcript_checkpoint_interval_seconds=_float(
+                os.getenv("VOXORA_TRANSCRIPT_CHECKPOINT_INTERVAL_SECONDS"), 20.0
+            ),
+            transcript_checkpoint_queue_size=_int(
+                os.getenv("VOXORA_TRANSCRIPT_CHECKPOINT_QUEUE_SIZE"), 8
+            ),
             log_level=os.getenv("VOXORA_LOG_LEVEL", "INFO"),
         )
         settings.validate()
@@ -184,6 +197,12 @@ class Settings:
                 )
         if self.webhook_max_attempts < 1:
             raise ValueError("VOXORA_WEBHOOK_MAX_ATTEMPTS must be >= 1")
+        if min(
+            self.voice_session_max_duration_seconds,
+            self.voice_session_max_turns,
+            self.voice_session_token_budget,
+        ) <= 0:
+            raise ValueError("Voice-session budget ceilings must be positive")
         if self.telephony_provider == "twilio":
             missing = [
                 name
@@ -209,6 +228,12 @@ class Settings:
         for principal in self.api_tokens.values():
             if principal.role not in {"admin", "operator", "viewer"}:
                 raise ValueError("API token roles must be admin, operator, or viewer")
+        if self.heartbeat_interval_seconds <= 0:
+            raise ValueError("VOXORA_HEARTBEAT_INTERVAL_SECONDS must be > 0")
+        if self.transcript_checkpoint_interval_seconds <= 0:
+            raise ValueError("VOXORA_TRANSCRIPT_CHECKPOINT_INTERVAL_SECONDS must be > 0")
+        if self.transcript_checkpoint_queue_size < 1:
+            raise ValueError("VOXORA_TRANSCRIPT_CHECKPOINT_QUEUE_SIZE must be >= 1")
 
     def public_summary(self) -> Dict[str, object]:
         return {
