@@ -5,6 +5,7 @@
 //! orchestrator; real media transport wiring is future work tracked in
 //! `docs/roadmap.md`.
 
+pub mod barge_in;
 pub mod bridge;
 pub mod turn;
 pub mod wav;

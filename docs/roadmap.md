@@ -100,13 +100,13 @@ verified patterns from competing browser-voice implementations (P3–P6):
   100 injected μ-law frames produce one utterance ⭢ decision ⭢ TTS frames out;
   per-hop latency counters non-zero. Legal/carrier review gate first (M3
   decision gate stands).
-- [ ] **Echo-safe barge-in decision function (P4).** Adopt the pure,
+- [x] **Echo-safe barge-in decision function (P4).** Adopt the pure,
   unit-testable decision curve (echo cooldown window + RMS threshold across
   N frames + minimum elapsed TTS time) as the Rust-side barge-in gate instead
   of raw VAD energy only; keep the existing barge-in in-guards as the state
   machine layer. Acceptance: table-driven tests proving playback echo cannot
   self-trigger and candidate speech ≥ threshold with ≥3 frames does.
-- [ ] **Transcribed-word-gated interruption (P5).** Barge-in confirmed only
+- [x] **Transcribed-word-gated interruption (P5).** Barge-in confirmed only
   after N transcribed words from STT (not bare VAD onset), so door slams and
   music don't kill a question — competing implementation verified value N=3.
   Acceptance: frames-only noise → no interruption; partial ASR words →
