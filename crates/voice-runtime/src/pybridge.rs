@@ -10,8 +10,6 @@
 //! `TelephonyResult`; the bridge error vocabulary surfaces as Python
 //! `ValueError` messages (`EmptyDialog`, `DialogNeverEnded`).
 
-use crate::bridge::{run_with_timing, DialogBackend, TurnLatency, Utterance};
-
 #[cfg(feature = "pyo3-bindings")]
 mod _py {
 
@@ -132,10 +130,220 @@ mod _py {
         Ok(to_python_json(&result.0, &result.1))
     }
 
+    /* ---------------------- turn detection engine ---------------------- */
+
+    /// Live turn-detection seam: one Rust `TurnDetectionController` per
+    /// Python-owned call. The caller keeps its own monotonic `seq` and
+    /// transport `timestampMs`; every feed returns the serialized event
+    /// batch (JSON array) produced by that call.
+    #[pyclass]
+    struct TurnDetectionEngine {
+        controller: crate::controller::TurnDetectionController,
+    }
+
+    fn profile_from_str(profile: &str) -> PyResult<crate::endpointing::EndpointProfile> {
+        match profile.trim().to_lowercase().as_str() {
+            "fast" => Ok(crate::endpointing::EndpointProfile::Fast),
+            "normal" => Ok(crate::endpointing::EndpointProfile::Normal),
+            "deliberate" => Ok(crate::endpointing::EndpointProfile::Deliberate),
+            other => Err(PyValueError::new_err(format!(
+                "unknown endpoint profile: {other} (fast|normal|deliberate)"
+            ))),
+        }
+    }
+
+    fn events_to_json(events: &[crate::td_events::TurnEvent]) -> String {
+        serde_json::to_string(events).expect("turn events serialize")
+    }
+
+    #[pymethods]
+    impl TurnDetectionEngine {
+        /// Build the engine for one call. `profile` is fast|normal|
+        /// deliberate; `semantic` toggles the heuristic semantic evaluator;
+        /// `word_gate_min_words` is the confirmed interruption word gate.
+        #[new]
+        #[pyo3(signature = (call_id, profile="normal", semantic=true, word_gate_min_words=3))]
+        fn new(
+            call_id: &str,
+            profile: &str,
+            semantic: bool,
+            word_gate_min_words: u32,
+        ) -> PyResult<Self> {
+            let mut cfg =
+                crate::controller::ControllerConfig::from_profile(call_id, profile_from_str(profile)?);
+            cfg.semantic_enabled = semantic;
+            cfg.word_gate_min_words = word_gate_min_words.max(1);
+            Ok(Self {
+                controller: crate::controller::TurnDetectionController::new(call_id, cfg),
+            })
+        }
+
+        /// Feed one frame of user/agent audio evidence. `agentPlaying`,
+        /// `ttsElapsedMs` and `sinceAgentAudioMs` describe playback from the
+        /// transport; for user-channel frames pass agent=false.
+        #[pyo3(signature = (seq, timestamp_ms, rms, agent_playing=false, tts_elapsed_ms=0, since_agent_audio_ms=0))]
+        fn feed_audio(
+            &mut self,
+            seq: u64,
+            timestamp_ms: u64,
+            rms: f64,
+            agent_playing: bool,
+            tts_elapsed_ms: u64,
+            since_agent_audio_ms: u64,
+        ) -> String {
+            let events = self.controller.feed_frame(
+                seq,
+                timestamp_ms,
+                rms as f32,
+                agent_playing,
+                tts_elapsed_ms,
+                since_agent_audio_ms,
+            );
+            events_to_json(&events)
+        }
+
+        /// Feed an STT transcript snapshot (`text` is the cumulative
+        /// partial, or the finalized utterance when `is_final`).
+        #[pyo3(signature = (seq, timestamp_ms, text, is_final=false))]
+        fn feed_transcript(&mut self, seq: u64, timestamp_ms: u64, text: &str, is_final: bool) -> String {
+            let events = self
+                .controller
+                .feed_lexical(seq, timestamp_ms, text, is_final);
+            events_to_json(&events)
+        }
+
+        /// Feed an external semantic verdict (`verdict` is
+        /// incomplete|complete|question|correction).
+        fn feed_semantic(
+            &mut self,
+            seq: u64,
+            timestamp_ms: u64,
+            verdict: &str,
+            confidence: f64,
+        ) -> PyResult<String> {
+            let report = crate::controller::SemanticReport {
+                verdict: parse_verdict(verdict)?,
+                confidence: confidence.clamp(0.0, 1.0) as f32,
+            };
+            let events = self
+                .controller
+                .feed_semantic(seq, timestamp_ms, report);
+            Ok(events_to_json(&events))
+        }
+
+        /// Feed a language-ID routing result; `switch` marks a language
+        /// change inside the open turn (grants the code-switch grace).
+        #[pyo3(signature = (seq, timestamp_ms, language, switch=false))]
+        fn feed_lid(
+            &mut self,
+            seq: u64,
+            timestamp_ms: u64,
+            language: &str,
+            switch: bool,
+        ) -> String {
+            let events = self.controller.feed_lid(seq, timestamp_ms, language, switch);
+            events_to_json(&events)
+        }
+
+        /// Feed one agent pipeline event: `kind` is thinking_started |
+        /// tts_started | tts_ended; `generation` is the TTS epoch.
+        fn feed_agent_event(
+            &mut self,
+            timestamp_ms: u64,
+            kind: &str,
+            generation: u64,
+        ) -> PyResult<String> {
+            let event = match kind.trim().to_lowercase().as_str() {
+                "thinking_started" => crate::controller::AgentEvent::ThinkingStarted,
+                "tts_started" => crate::controller::AgentEvent::TtsStarted { generation },
+                "tts_ended" => crate::controller::AgentEvent::TtsEnded { generation },
+                other => {
+                    return Err(PyValueError::new_err(format!(
+                        "unknown agent event kind: {other} \
+                         (thinking_started|tts_started|tts_ended)"
+                    )))
+                }
+            };
+            let events = self.controller.feed_agent(timestamp_ms, event);
+            Ok(events_to_json(&events))
+        }
+
+        /// Signal a provider failure (stt/vad down): the controller resiles
+        /// into degraded acoustic-only mode while the hatch stays armed.
+        fn note_provider_failure(&mut self, timestamp_ms: u64, hint: &str) -> String {
+            let events = self
+                .controller
+                .note_provider_failure(timestamp_ms, hint);
+            events_to_json(&events)
+        }
+
+        /// Signal provider recovery; re-arms full detection state.
+        fn note_provider_recovered(&mut self, timestamp_ms: u64) -> String {
+            let events = self.controller.note_provider_recovered(timestamp_ms);
+            events_to_json(&events)
+        }
+
+        /// End the call: terminal state, nothing else is accepted.
+        fn end_call(&mut self, timestamp_ms: u64) -> String {
+            events_to_json(&self.controller.end_call(timestamp_ms))
+        }
+
+        /// Diagnostic snapshot (JSON object): counters, state, partial.
+        fn snapshot(&self) -> String {
+            let snap = self.controller.snapshot();
+            serde_json::to_string(&serde_json::json!({
+                "state": snap.state,
+                "turnId": snap.turn_id,
+                "generation": snap.generation,
+                "rejectedInputs": snap.rejected_inputs,
+                "staleAgentEvents": snap.stale_agent_events,
+                "reorderedInputs": snap.reordered_inputs,
+                "turnsCompleted": snap.turns_completed,
+                "interruptions": snap.interruptions,
+                "providerFailures": snap.provider_failures,
+                "language": snap.language,
+                "semanticEnabled": snap.semantic_enabled,
+                "lastPartial": snap.last_partial,
+            }))
+            .expect("snapshot serializes")
+        }
+
+        /// Current state name (convenience for fast Python branching).
+        fn state(&self) -> String {
+            let name = serde_json::to_string(&self.controller.state())
+                .expect("state serializes");
+            name.trim_matches('"').to_string()
+        }
+
+        /// Current turn ordinal.
+        fn turn_id(&self) -> u64 {
+            self.controller.turn_id()
+        }
+
+        /// Current pipeline generation (bumped on interruption).
+        fn generation(&self) -> u64 {
+            self.controller.generation()
+        }
+    }
+
+    fn parse_verdict(verdict: &str) -> PyResult<crate::td_events::SemanticVerdict> {
+        match verdict.trim().to_lowercase().as_str() {
+            "incomplete" => Ok(crate::td_events::SemanticVerdict::Incomplete),
+            "complete" => Ok(crate::td_events::SemanticVerdict::Complete),
+            "question" => Ok(crate::td_events::SemanticVerdict::Question),
+            "correction" => Ok(crate::td_events::SemanticVerdict::Correction),
+            other => Err(PyValueError::new_err(format!(
+                "unknown semantic verdict: {other} \
+                 (incomplete|complete|question|correction)"
+            ))),
+        }
+    }
+
     #[pymodule]
     #[pyo3(name = "voxora_voice_runtime")]
     fn voxora_voice_runtime(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(run_scripted_call_json, m)?)?;
+        m.add_class::<TurnDetectionEngine>()?;
         m.add("__version__", env!("CARGO_PKG_VERSION"))?;
         Ok(())
     }

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 
 def _bool(value: Optional[str], default: bool = False) -> bool:
@@ -30,6 +30,17 @@ def _float(value: Optional[str], default: float) -> float:
         return float(value)
     except ValueError:
         return default
+
+
+def _json_object_env(name: str) -> Dict[str, Any]:
+    """Parse one JSON-object environment variable; unset/empty means off."""
+    raw = os.getenv(name)
+    if not raw or not raw.strip():
+        return {}
+    parsed = json.loads(raw)
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{name} must be a JSON object")
+    return parsed
 
 
 @dataclass(frozen=True)
@@ -87,6 +98,12 @@ class Settings:
     voice_session_max_duration_seconds: int = 1200
     voice_session_max_turns: int = 80
     voice_session_token_budget: int = 60000
+    turn_endpoint_profile: str = "normal"
+    turn_semantic_enabled: bool = True
+    turn_word_gate_min_words: int = 3
+    turn_diagnostics_engines: int = 64
+    voice_provider_adapters: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    voice_provider_chains: Dict[str, List[str]] = field(default_factory=dict)
     log_level: str = "INFO"
 
     @classmethod
@@ -153,6 +170,14 @@ class Settings:
             transcript_checkpoint_queue_size=_int(
                 os.getenv("VOXORA_TRANSCRIPT_CHECKPOINT_QUEUE_SIZE"), 8
             ),
+            turn_endpoint_profile=os.getenv("VOXORA_TURN_ENDPOINT_PROFILE", "normal")
+            .strip()
+            .lower(),
+            turn_semantic_enabled=_bool(os.getenv("VOXORA_TURN_SEMANTIC_ENABLED"), True),
+            turn_word_gate_min_words=_int(os.getenv("VOXORA_TURN_WORD_GATE_MIN_WORDS"), 3),
+            turn_diagnostics_engines=_int(os.getenv("VOXORA_TURN_DIAGNOSTICS_ENGINES"), 64),
+            voice_provider_adapters=_json_object_env("VOXORA_VOICE_PROVIDER_ADAPTERS"),
+            voice_provider_chains=_json_object_env("VOXORA_VOICE_PROVIDER_CHAINS"),
             log_level=os.getenv("VOXORA_LOG_LEVEL", "INFO"),
         )
         settings.validate()
@@ -167,6 +192,21 @@ class Settings:
             raise ValueError("VOXORA_STORAGE=postgres requires VOXORA_DATABASE_URL")
 
     def validate(self) -> None:
+        if self.turn_endpoint_profile not in ("fast", "normal", "deliberate"):
+            raise ValueError(
+                "VOXORA_TURN_ENDPOINT_PROFILE must be fast|normal|deliberate,"
+                f" got {self.turn_endpoint_profile!r}"
+            )
+        if self.turn_word_gate_min_words < 1:
+            raise ValueError(
+                "VOXORA_TURN_WORD_GATE_MIN_WORDS must be >= 1,"
+                f" got {self.turn_word_gate_min_words}"
+            )
+        if self.turn_diagnostics_engines < 0:
+            raise ValueError(
+                "VOXORA_TURN_DIAGNOSTICS_ENGINES must be >= 0,"
+                f" got {self.turn_diagnostics_engines}"
+            )
         if len(self.secret_key) < 32:
             raise ValueError("VOXORA_SECRET_KEY must be at least 32 characters")
         if self.env == "production" and "development-only" in self.secret_key:
@@ -234,6 +274,12 @@ class Settings:
             raise ValueError("VOXORA_TRANSCRIPT_CHECKPOINT_INTERVAL_SECONDS must be > 0")
         if self.transcript_checkpoint_queue_size < 1:
             raise ValueError("VOXORA_TRANSCRIPT_CHECKPOINT_QUEUE_SIZE must be >= 1")
+        if self.voice_provider_adapters or self.voice_provider_chains:
+            # Deferred import: voice_providers imports Settings from here;
+            # the pyreverseetl availability check above is the same pattern.
+            from .voice_providers import validate_routing_config
+
+            validate_routing_config(self.voice_provider_adapters, self.voice_provider_chains)
 
     def public_summary(self) -> Dict[str, object]:
         return {

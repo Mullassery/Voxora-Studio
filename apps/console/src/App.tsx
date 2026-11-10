@@ -1,5 +1,17 @@
 import { useCallback, useEffect, useState } from "react";
-import { AgentRow, ApiError, Campaign, CallRow, ConsoleApi, ContactRow, Envelope } from "./api";
+import {
+  AgentRow,
+  ApiError,
+  Campaign,
+  CallRow,
+  ConsoleApi,
+  ContactRow,
+  Envelope,
+  TurnConfig,
+  TurnEngineView,
+  TurnEvent,
+  TurnFeedResult,
+} from "./api";
 
 interface CampaignTemplate {
   label: string;
@@ -38,7 +50,7 @@ const TEMPLATES: CampaignTemplate[] = [
   },
 ];
 
-type Tab = "overview" | "campaigns" | "contacts" | "calls";
+type Tab = "overview" | "campaigns" | "contacts" | "calls" | "voice";
 
 const TOKEN_KEY = "voxora-token";
 const ACTIONS = ["start", "pause", "resume", "cancel"] as const;
@@ -126,7 +138,7 @@ export function App() {
       <header>
         <h1>Voxora Studio</h1>
         <nav>
-          {(["overview", "campaigns", "contacts", "calls"] as Tab[]).map((name) => (
+          {(["overview", "campaigns", "contacts", "calls", "voice"] as Tab[]).map((name) => (
             <button key={name} className={tab === name ? "active" : ""} onClick={() => setTab(name)}>
               {name}
             </button>
@@ -141,6 +153,7 @@ export function App() {
       {tab === "campaigns" && <Campaigns api={api} onError={setError} />}
       {tab === "contacts" && <Contacts api={api} onError={setError} />}
       {tab === "calls" && <Calls api={api} onError={setError} />}
+      {tab === "voice" && <VoiceTurn api={api} onError={setError} />}
     </main>
   );
 }
@@ -427,5 +440,141 @@ function Calls({ api, onError }: { api: ConsoleApi; onError: (message: string | 
         )}
       </tbody>
     </table>
+  );
+}
+
+function VoiceTurn({ api, onError }: { api: ConsoleApi; onError: (message: string | null) => void }) {
+  const [config, setConfig] = useState<TurnConfig | null>(null);
+  const [engine, setEngine] = useState<TurnEngineView | null>(null);
+  const [events, setEvents] = useState<TurnEvent[]>([]);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      setConfig(await api.turnConfig());
+      const page = (await api.listTurnEngines()) as Envelope<TurnEngineView[]>;
+      setEngine(page.data[page.data.length - 1] ?? null);
+      onError(null);
+    } catch (err) {
+      onError(err instanceof ApiError ? err.message : String(err));
+    }
+  }, [api, onError]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const create = async () => {
+    setBusy(true);
+    try {
+      setEngine(await api.createTurnEngine(`probe-${Date.now()}`));
+      setEvents([]);
+      await load();
+      onError(null);
+    } catch (err) {
+      onError(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // One scripted turn: speak 10 frames, go silent, endpoint confirms the
+  // boundary exactly as the Rust controller unit tests drive it.
+  const speakTurn = async () => {
+    if (!engine) return;
+    setBusy(true);
+    try {
+      await api.engineAction(engine.id, "transcript", {
+        text: "I need an appointment for Tuesday",
+        is_final: false,
+      });
+      const collected: TurnEvent[] = [...events];
+      for (let i = 0; i < 10; i++) {
+        const result: TurnFeedResult = await api.engineAction(engine.id, "speak", { rms: 0.4 });
+        collected.push(...result.events);
+      }
+      for (let i = 0; i < 45; i++) {
+        const result: TurnFeedResult = await api.engineAction(engine.id, "silence", { rms: 0.005 });
+        collected.push(...result.events);
+      }
+      setEvents(collected.slice(-200));
+      onError(null);
+      await load();
+    } catch (err) {
+      onError(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const endEngine = async () => {
+    if (!engine) return;
+    setBusy(true);
+    try {
+      await api.deleteTurnEngine(engine.id);
+      setEngine(null);
+      await load();
+      onError(null);
+    } catch (err) {
+      onError(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section>
+      <button onClick={() => void load()}>Refresh</button>
+      {config && (
+        <dl>
+          <dt>Engine: {config.engineAvailable ? `rust ${config.engineVersion}` : "not installed (make py-voice)"}</dt>
+          <dt>Profile: {config.profile} · semantic: {String(config.semanticEnabled)} · word gate: {config.wordGateMinWords}</dt>
+          <dt>Engines: {config.activeEngines}/{config.engineCapacity}</dt>
+        </dl>
+      )}
+      <div>
+        <button onClick={() => void create()} disabled={busy}>New probe engine</button>
+        {engine && (
+          <>
+            <button onClick={() => void speakTurn()} disabled={busy}>Scripted turn</button>
+            <button onClick={() => void endEngine()} disabled={busy}>End engine</button>
+          </>
+        )}
+      </div>
+      {engine && (
+        <table>
+          <thead>
+            <tr><th>Call</th><th>State</th><th>Turn</th><th>Completed</th><th>Interrupts</th></tr>
+          </thead>
+          <tbody>
+            <tr key={engine.id}>
+              <td>{engine.id.slice(0, 16)}…</td>
+              <td>{String(engine.state)}</td>
+              <td>{String(engine.turn_id)}</td>
+              <td>{String(engine.turns_completed)}</td>
+              <td>{String(engine.interruptions)}</td>
+            </tr>
+          </tbody>
+        </table>
+      )}
+      {events.length > 0 && (
+        <table>
+          <thead>
+            <tr><th>t (ms)</th><th>Event</th><th>State</th><th>Source</th></tr>
+          </thead>
+          <tbody>
+            {events.map((event, index) => (
+              <tr key={`${event.event_type}-${event.timestamp_ms}-${index}`}>
+                <td>{event.timestamp_ms}</td>
+                <td>{event.event_type}{event.confidence != null ? ` (${event.confidence.toFixed(2)})` : ""}</td>
+                <td>{event.state}</td>
+                <td>{event.source}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {engine && events.length === 0 && <p className="muted">Run a scripted turn to see the detection events.</p>}
+    </section>
   );
 }

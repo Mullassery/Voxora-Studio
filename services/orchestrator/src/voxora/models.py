@@ -250,3 +250,67 @@ class CampaignSyncRequest(BaseModel):
     connection_id: Optional[str] = None
     limit: int = Field(default=100, ge=1, le=100)
     max_pages: int = Field(default=20, ge=1, le=100)
+
+class TurnEngineCreate(BaseModel):
+    """Body for creating a turn-detection diagnostic engine."""
+
+    model_config = {"extra": "forbid"}
+    call_id: str = Field(min_length=1, max_length=120)
+    profile: Optional[str] = Field(default=None, max_length=40)
+    semantic_enabled: Optional[bool] = None
+    word_gate_min_words: Optional[int] = Field(default=None, ge=1, le=10)
+
+
+class TurnAudioFrame(BaseModel):
+    """One frame of audio evidence for the turn-detection engine."""
+
+    model_config = {"extra": "forbid"}
+    rms: float = Field(ge=0.0, le=1.0)
+    agent_playing: bool = False
+    tts_elapsed_ms: int = Field(default=0, ge=0, le=3_600_000)
+    since_agent_audio_ms: int = Field(default=0, ge=0, le=3_600_000)
+    timestamp_ms: Optional[int] = Field(default=None, ge=0)
+
+
+class TurnTranscript(BaseModel):
+    """A cumulative transcript snapshot for the turn-detection engine."""
+
+    model_config = {"extra": "forbid"}
+    text: str = Field(max_length=4000)
+    is_final: bool = False
+    timestamp_ms: Optional[int] = Field(default=None, ge=0)
+
+
+class TurnSemanticReport(BaseModel):
+    """An external semantic verdict for the turn-detection engine."""
+
+    model_config = {"extra": "forbid"}
+    verdict: str = Field(min_length=1, max_length=20)
+    confidence: float = Field(ge=0.0, le=1.0)
+    timestamp_ms: Optional[int] = Field(default=None, ge=0)
+
+
+class TurnLidReport(BaseModel):
+    """A language-ID routing result for the turn-detection engine."""
+
+    model_config = {"extra": "forbid"}
+    language: str = Field(min_length=1, max_length=40)
+    switch: bool = False
+    timestamp_ms: Optional[int] = Field(default=None, ge=0)
+
+
+class TurnAgentEvent(BaseModel):
+    """An agent-pipeline lifecycle event for the turn-detection engine."""
+
+    model_config = {"extra": "forbid"}
+    kind: str = Field(min_length=1, max_length=40)
+    generation: int = Field(default=0, ge=0)
+    timestamp_ms: Optional[int] = Field(default=None, ge=0)
+
+
+class TurnProviderFailure(BaseModel):
+    """A provider-down signal for the turn-detection engine."""
+
+    model_config = {"extra": "forbid"}
+    hint: str = Field(max_length=200)
+    timestamp_ms: Optional[int] = Field(default=None, ge=0)

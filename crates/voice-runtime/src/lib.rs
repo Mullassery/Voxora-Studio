@@ -9,8 +9,13 @@
 
 pub mod barge_in;
 pub mod bridge;
+pub mod controller;
+pub mod endpointing;
 pub mod media;
+pub mod semantic;
+pub mod td_events;
 pub mod turn;
+pub mod vad;
 pub mod wav;
 
 #[cfg(feature = "pyo3-bindings")]

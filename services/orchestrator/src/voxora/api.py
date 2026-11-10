@@ -5,9 +5,9 @@ from __future__ import annotations
 import hashlib
 import logging
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, OrderedDict, Tuple
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -35,6 +35,13 @@ from .models import (
     RecipientAdd,
     SessionInstruction,
     SuppressionCreate,
+    TurnAgentEvent,
+    TurnAudioFrame,
+    TurnEngineCreate,
+    TurnLidReport,
+    TurnProviderFailure,
+    TurnSemanticReport,
+    TurnTranscript,
     VoiceSessionCreate,
 )
 from .observability import configure_logging
@@ -42,7 +49,34 @@ from .security import SecretBox, safe_equal
 from .seed import seed_demo
 from .state import InvalidTransition
 from .telephony import build_telephony_adapter, telephony_provider_status
+from .voice_turn_detection import (
+    AGENT_EVENT_KINDS,
+    ENDPOINT_PROFILES,
+    SEMANTIC_VERDICTS,
+    TURN_SCHEMA_VERSION,
+    TurnDetectionEngine,
+    TurnDetectionError,
+)
+from .voice_turn_detection import (
+    engine_available as turn_engine_available,
+)
+from .voice_turn_detection import (
+    extension_version as turn_extension_version,
+)
 from .worker import CampaignWorker
+
+_TURN_EVENT_BUFFER_MAX = 512
+TURN_STATES = (
+    "idle", "listening", "speech_detected", "in_turn", "pending_end",
+    "turn_complete", "ai_thinking", "ai_speaking", "interruption_candidate",
+    "interrupted", "recovering", "ended",
+)
+TURN_EVENT_TYPES = (
+    "speech_started", "speech_ended", "endpoint_candidate", "turn_completed",
+    "turn_continued", "interruption_detected", "tts_cancelled",
+    "transcription_finalized", "turn_state_changed", "turn_timeout",
+    "provider_failed", "recovered", "rejected",
+)
 
 logger = logging.getLogger(__name__)
 SUPPORTED_CANONICAL_FIELDS = {
@@ -135,8 +169,12 @@ def _telephony_capabilities(settings: Any) -> Dict[str, Any]:
             "simulated": True,
             "final_on_place": True,
             "transcript": True,
-            "mid_call_instructions": False,
-            "message": "Scripted Rust bridge; instruction injection arrives with the media pipeline slice.",
+            "mid_call_instructions": True,
+            "message": (
+                "Media backend with the live turn loop (M7): mid-call instructions "
+                "are spoken at the next stream boundary; STT/TTS remain deterministic "
+                "simulations the Rust MediaBridge mounts behind the MediaTransport seam."
+            ),
         }
     if provider == "twilio" and settings.allow_live_calls:
         return {
@@ -298,6 +336,9 @@ def create_app(
     app.state.started_at = None
     app.state.seed = None
     app.state.worker = None
+    # Turn-detection diagnostic engines (simulate-probe surface): FIFO
+    # bounded by VOXORA_TURN_DIAGNOSTICS_ENGINES, tenant-scoped.
+    app.state.turn_engines = OrderedDict()
     default_factory: Callable[[Dict[str, Any], SecretBox], Any] = (
         adapter_factory or (lambda connection, secret_box: build_crm_adapter(connection, secret_box))
     )
@@ -1081,6 +1122,307 @@ def create_app(
             "data": telephony_provider_status(app.state.settings),
             "active": telephony_provider_status(app.state.settings)[0]["id"] if app.state.settings.telephony_provider == "mock" else None,
         }
+
+    # --------------------------------------------- turn detection diagnostics
+    # Every feature of the Rust turn-detection engine (crates/voice-runtime
+    # controller.rs) maps onto an endpoint here. The engines are
+    # simulation probes: one per session, tenant-scoped, bounded by
+    # VOXORA_TURN_DIAGNOSTICS_ENGINES; the event batches are the canonical
+    # `td_events.rs` schema (snake_case) passed through verbatim.
+
+    def turn_engine_registry() -> OrderedDict[str, Dict[str, Any]]:
+        return app.state.turn_engines
+
+    def _turn_engine_or_404(engine_id: str) -> Tuple[TurnDetectionEngine, Dict[str, Any]]:
+        engine_record = turn_engine_registry().get(engine_id)
+        if engine_record is None:
+            raise ApiError(404, "Turn-detection engine not found", "turn_engine_not_found")
+        return engine_record["engine"], engine_record
+
+    def _turn_engine_for_tenant_or_404(engine_id: str, tenant_id: str) -> Tuple[TurnDetectionEngine, Dict[str, Any]]:
+        engine, record = _turn_engine_or_404(engine_id)
+        if record["tenant_id"] != tenant_id:
+            raise ApiError(404, "Turn-detection engine not found", "turn_engine_not_found")
+        return engine, record
+
+    def _turn_timestamp(payload_timestamp: Optional[int], record: Dict[str, Any]) -> int:
+        # The engine never reads clocks: sessions start at 0 and callers
+        # advance transport time. A null timestamp continues the session
+        # clock at 20ms cadence per engine call.
+        if payload_timestamp is not None:
+            return int(payload_timestamp)
+        record["auto_ts"] = int(record.get("auto_ts", 0)) + 20
+        return int(record["auto_ts"])
+
+    def _turn_events_response(
+        record: Dict[str, Any], events: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        # Retain a bounded diagnostics window (newest last) for the replay
+        # endpoint and the console turn timeline.
+        buffer: List[Dict[str, Any]] = record["events"]
+        if events:
+            buffer.extend(events)
+            del buffer[:-_TURN_EVENT_BUFFER_MAX]
+        return {"events": events, "snapshot": record["engine"].snapshot()}
+
+    @app.get("/api/v1/voice/turn/config")
+    def turn_config(principal: TenantPrincipal = Depends(_principal_from_request)) -> Dict[str, Any]:
+        settings: Settings = app.state.settings
+        return {
+            "engineAvailable": turn_engine_available(),
+            "engineVersion": turn_extension_version(),
+            "profile": settings.turn_endpoint_profile,
+            "semanticEnabled": settings.turn_semantic_enabled,
+            "wordGateMinWords": settings.turn_word_gate_min_words,
+            "schemaVersion": TURN_SCHEMA_VERSION,
+            "states": list(TURN_STATES),
+            "eventTypes": list(TURN_EVENT_TYPES),
+            "profiles": list(ENDPOINT_PROFILES),
+            "agentEventKinds": list(AGENT_EVENT_KINDS),
+            "semanticVerdicts": list(SEMANTIC_VERDICTS),
+            "activeEngines": len(turn_engine_registry()),
+            "engineCapacity": settings.turn_diagnostics_engines,
+        }
+
+    @app.post("/api/v1/voice/turn/engines", status_code=201)
+    def create_turn_engine(
+        payload: TurnEngineCreate, principal: TenantPrincipal = Depends(_principal_from_request)
+    ) -> Dict[str, Any]:
+        _require_writer(principal)
+        settings: Settings = app.state.settings
+        if not turn_engine_available():
+            raise ApiError(
+                503,
+                "voxora_voice_runtime is not installed; build it with "
+                "`make py-voice` or `pip install -e crates/voice-runtime`.",
+                "turn_engine_unavailable",
+            )
+        registry = turn_engine_registry()
+        while len(registry) >= settings.turn_diagnostics_engines:
+            # FIFO eviction: the oldest diagnostic engine is retired.
+            _, evicted = next(iter(registry.items()))
+            with suppress(TurnDetectionError):
+                # Already ended evictions are inert and harmless.
+                evicted["engine"].end_call(evicted.get("auto_ts", 0))
+            registry.pop(next(iter(registry.keys())))
+        profile = payload.profile or settings.turn_endpoint_profile
+        try:
+            engine: TurnDetectionEngine = TurnDetectionEngine(
+                call_id=payload.call_id,
+                profile=profile,
+                semantic_enabled=(
+                    payload.semantic_enabled
+                    if payload.semantic_enabled is not None
+                    else settings.turn_semantic_enabled
+                ),
+                word_gate_min_words=(
+                    payload.word_gate_min_words
+                    if payload.word_gate_min_words is not None
+                    else settings.turn_word_gate_min_words
+                ),
+            )
+        except TurnDetectionError as error:
+            raise ApiError(400, str(error), "turn_engine_invalid") from None
+        engine_id = str(uuid.uuid4())
+        record: Dict[str, Any] = {
+            "engine": engine,
+            "engine_id": engine_id,
+            "tenant_id": principal.tenant_id,
+            "call_id": payload.call_id,
+            "profile": profile,
+            "created_at": now_iso(),
+            "auto_ts": 0,
+            "events": [],
+        }
+        registry[engine_id] = record
+        app.state.db.audit(
+            principal.tenant_id,
+            principal.name,
+            "voice.turn_engine_created",
+            "turn_engine",
+            engine_id,
+            {"profile": profile},
+        )
+        return {"id": engine_id, **record["engine"].snapshot(), "createdAt": record["created_at"]}
+
+    @app.get("/api/v1/voice/turn/engines")
+    def list_turn_engines(principal: TenantPrincipal = Depends(_principal_from_request)) -> Dict[str, Any]:
+        registry = turn_engine_registry()
+        return {
+            "data": [
+                {
+                    "id": engine_id,
+                    "callId": record["call_id"],
+                    "profile": record["profile"],
+                    "createdAt": record["created_at"],
+                    **record["engine"].snapshot(),
+                }
+                for engine_id, record in registry.items()
+                if record["tenant_id"] == principal.tenant_id
+            ]
+        }
+
+    @app.get("/api/v1/voice/turn/engines/{engine_id}")
+    def get_turn_engine(engine_id: str, principal: TenantPrincipal = Depends(_principal_from_request)) -> Dict[str, Any]:
+        _, record = _turn_engine_for_tenant_or_404(engine_id, principal.tenant_id)
+        return {
+            "id": engine_id,
+            "callId": record["call_id"],
+            "profile": record["profile"],
+            "createdAt": record["created_at"],
+            **record["engine"].snapshot(),
+        }
+
+    @app.post("/api/v1/voice/turn/engines/{engine_id}/frames")
+    def feed_turn_frame(
+        engine_id: str,
+        payload: TurnAudioFrame,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        engine, record = _turn_engine_or_404(engine_id)
+        if record["tenant_id"] != principal.tenant_id:
+            raise ApiError(404, "Turn-detection engine not found", "turn_engine_not_found")
+        try:
+            events = engine.feed_audio(
+                _turn_timestamp(payload.timestamp_ms, record),
+                payload.rms,
+                payload.agent_playing,
+                payload.tts_elapsed_ms,
+                payload.since_agent_audio_ms,
+            )
+        except TurnDetectionError as error:
+            raise ApiError(409, str(error), "turn_engine_rejected") from None
+        return _turn_events_response(record, events)
+
+    @app.post("/api/v1/voice/turn/engines/{engine_id}/transcript")
+    def feed_turn_transcript(
+        engine_id: str,
+        payload: TurnTranscript,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        engine, record = _turn_engine_or_404(engine_id)
+        if record["tenant_id"] != principal.tenant_id:
+            raise ApiError(404, "Turn-detection engine not found", "turn_engine_not_found")
+        try:
+            events = engine.feed_transcript(
+                _turn_timestamp(payload.timestamp_ms, record), payload.text, payload.is_final
+            )
+        except TurnDetectionError as error:
+            raise ApiError(409, str(error), "turn_engine_rejected") from None
+        return _turn_events_response(record, events)
+
+    @app.post("/api/v1/voice/turn/engines/{engine_id}/semantic")
+    def feed_turn_semantic(
+        engine_id: str,
+        payload: TurnSemanticReport,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        engine, record = _turn_engine_or_404(engine_id)
+        if record["tenant_id"] != principal.tenant_id:
+            raise ApiError(404, "Turn-detection engine not found", "turn_engine_not_found")
+        try:
+            events = engine.feed_semantic(
+                _turn_timestamp(payload.timestamp_ms, record), payload.verdict, payload.confidence
+            )
+        except TurnDetectionError as error:
+            raise ApiError(409, str(error), "turn_engine_rejected") from None
+        return _turn_events_response(record, events)
+
+    @app.post("/api/v1/voice/turn/engines/{engine_id}/lid")
+    def feed_turn_lid(
+        engine_id: str,
+        payload: TurnLidReport,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        engine, record = _turn_engine_or_404(engine_id)
+        if record["tenant_id"] != principal.tenant_id:
+            raise ApiError(404, "Turn-detection engine not found", "turn_engine_not_found")
+        try:
+            events = engine.feed_lid(
+                _turn_timestamp(payload.timestamp_ms, record), payload.language, payload.switch
+            )
+        except TurnDetectionError as error:
+            raise ApiError(409, str(error), "turn_engine_rejected") from None
+        return _turn_events_response(record, events)
+
+    @app.post("/api/v1/voice/turn/engines/{engine_id}/agent-events")
+    def feed_turn_agent_event(
+        engine_id: str,
+        payload: TurnAgentEvent,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        engine, record = _turn_engine_or_404(engine_id)
+        if record["tenant_id"] != principal.tenant_id:
+            raise ApiError(404, "Turn-detection engine not found", "turn_engine_not_found")
+        try:
+            events = engine.feed_agent_event(
+                _turn_timestamp(payload.timestamp_ms, record), payload.kind, payload.generation
+            )
+        except TurnDetectionError as error:
+            raise ApiError(409, str(error), "turn_engine_rejected") from None
+        return _turn_events_response(record, events)
+
+    @app.post("/api/v1/voice/turn/engines/{engine_id}/provider-failure")
+    def feed_turn_provider_failure(
+        engine_id: str,
+        payload: TurnProviderFailure,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        engine, record = _turn_engine_or_404(engine_id)
+        if record["tenant_id"] != principal.tenant_id:
+            raise ApiError(404, "Turn-detection engine not found", "turn_engine_not_found")
+        try:
+            events = engine.note_provider_failure(
+                _turn_timestamp(payload.timestamp_ms, record), payload.hint
+            )
+        except TurnDetectionError as error:
+            raise ApiError(409, str(error), "turn_engine_rejected") from None
+        return _turn_events_response(record, events)
+
+    @app.post("/api/v1/voice/turn/engines/{engine_id}/provider-recovery")
+    def feed_turn_provider_recovery(
+        engine_id: str,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        engine, record = _turn_engine_or_404(engine_id)
+        if record["tenant_id"] != principal.tenant_id:
+            raise ApiError(404, "Turn-detection engine not found", "turn_engine_not_found")
+        try:
+            events = engine.note_provider_recovered(_turn_timestamp(None, record))
+        except TurnDetectionError as error:
+            raise ApiError(409, str(error), "turn_engine_rejected") from None
+        return _turn_events_response(record, events)
+
+    @app.get("/api/v1/voice/turn/engines/{engine_id}/events")
+    def get_turn_engine_events(
+        engine_id: str,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        _, record = _turn_engine_for_tenant_or_404(engine_id, principal.tenant_id)
+        return {"id": engine_id, "events": record["events"]}
+
+    @app.delete("/api/v1/voice/turn/engines/{engine_id}", status_code=200)
+    def delete_turn_engine(engine_id: str, principal: TenantPrincipal = Depends(_principal_from_request)) -> Dict[str, Any]:
+        _require_writer(principal)
+        engine, record = _turn_engine_for_tenant_or_404(engine_id, principal.tenant_id)
+        final_events: List[Dict[str, Any]] = []
+        try:
+            final_events = engine.end_call(_turn_timestamp(None, record))
+        except TurnDetectionError as error:  # already ended: still evict
+            logging.getLogger(__name__).debug("turn engine double-end: %s", error)
+        response: Dict[str, Any] = {"ended": True, "snapshot": record["engine"].snapshot()}
+        if final_events:
+            response["events"] = final_events
+        app.state.db.audit(
+            principal.tenant_id,
+            principal.name,
+            "voice.turn_engine_ended",
+            "turn_engine",
+            engine_id,
+            {"turnsCompleted": record["engine"].snapshot().get("turnsCompleted", 0)},
+        )
+        turn_engine_registry().pop(engine_id, None)
+        return response
 
     # ---------------------------------------------------------- CRM adapters
     @app.get("/api/v1/integrations/crm/providers")

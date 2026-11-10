@@ -200,6 +200,74 @@ export class ConsoleApi {
       connection_id: connectionId,
     }), { method: "PUT", body: { mappings } });
   }
+
+  // -- turn detection diagnostics (routes not in the generated paths yet) --
+
+  turnConfig(): Promise<TurnConfig> {
+    return this.request("/api/v1/voice/turn/config");
+  }
+
+  createTurnEngine(callId: string): Promise<TurnEngineView> {
+    return this.request("/api/v1/voice/turn/engines", { method: "POST", body: { call_id: callId } });
+  }
+
+  listTurnEngines(): Promise<Envelope<TurnEngineView[]>> {
+    return this.request("/api/v1/voice/turn/engines");
+  }
+
+  engineAction(engineId: string, action: string, body: Record<string, unknown> = {}): Promise<TurnFeedResult> {
+    const paths: Record<string, string> = {
+      speak: "/frames",
+      silence: "/frames",
+      transcript: "/transcript",
+      tts: "/agent-events",
+      recovery: "/provider-recovery",
+    };
+    return this.request(`/api/v1/voice/turn/engines/${encodeURIComponent(engineId)}${paths[action]}`, {
+      method: "POST",
+      body,
+    });
+  }
+
+  deleteTurnEngine(engineId: string): Promise<unknown> {
+    return this.request(`/api/v1/voice/turn/engines/${encodeURIComponent(engineId)}`, { method: "DELETE" });
+  }
+}
+
+export interface TurnConfig {
+  engineAvailable: boolean;
+  engineVersion: string | null;
+  profile: string;
+  semanticEnabled: boolean;
+  wordGateMinWords: number;
+  schemaVersion: number;
+  activeEngines: number;
+  engineCapacity: number;
+}
+
+export interface TurnEvent {
+  schema_version: number;
+  turn_id: number;
+  generation: number;
+  timestamp_ms: number;
+  event_type: string;
+  state: string;
+  source: string;
+  confidence?: number | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface TurnEngineView extends Record<string, unknown> {
+  id: string;
+  state: string;
+  turn_id: number;
+  turns_completed: number;
+  interruptions: number;
+}
+
+export interface TurnFeedResult {
+  events: TurnEvent[];
+  snapshot: Record<string, unknown>;
 }
 
 export interface Campaign {

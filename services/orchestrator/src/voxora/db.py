@@ -37,6 +37,39 @@ JSON_COLUMNS = {
     "transcript",
 }
 
+MODEL_PROFILE_TASKS = ("turn", "analyze")
+DEFAULT_MODEL_PROFILE = "default"
+
+
+def builtin_model_profiles() -> Dict[str, Dict[str, str]]:
+    """Config-in-db seed source for model profiles.
+
+    `VOXORA_MODEL_PROFILES` (JSON `{profile: {task: model}}`) seeds extra
+    named profiles; otherwise the built-in `default` profile routes the
+    interview turn to `OPENROUTER_MODEL` (or `mock-llm`) and the
+    summarize/analyze task to `OPENROUTER_ANALYZE_MODEL` (or the turn
+    model). Read at seed time so tests and operators can set env before
+    the first tenant is ensured; once seeded, the DB rows are the source
+    of truth (config-in-db).
+    """
+    raw = os.environ.get("VOXORA_MODEL_PROFILES")
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            seeded = {
+                str(name): {str(task): str(model) for task, model in models.items()}
+                for name, models in parsed.items()
+                if isinstance(models, dict) and models
+            }
+            if seeded:
+                return seeded
+    turn = os.environ.get("OPENROUTER_MODEL") or "mock-llm"
+    analyze = os.environ.get("OPENROUTER_ANALYZE_MODEL") or turn
+    return {DEFAULT_MODEL_PROFILE: {"turn": turn, "analyze": analyze}}
+
 
 def database_from_settings(settings: Any) -> Database:
     """Build the storage backend requested by settings (sqlite | postgres)."""
@@ -350,6 +383,33 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_audit_tenant ON audit_logs(tenant_id, created_at);
+
+CREATE TABLE IF NOT EXISTS model_profiles (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    profile TEXT NOT NULL,
+    task TEXT NOT NULL,
+    model TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(tenant_id, profile, task)
+);
+CREATE INDEX IF NOT EXISTS idx_model_profiles_tenant ON model_profiles(tenant_id, profile);
+
+CREATE TABLE IF NOT EXISTS ai_usage (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    profile TEXT,
+    task TEXT NOT NULL DEFAULT 'turn',
+    model TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    prompt_tokens REAL NOT NULL DEFAULT 0,
+    completion_tokens REAL NOT NULL DEFAULT 0,
+    total_tokens REAL NOT NULL DEFAULT 0,
+    cost_usd REAL NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ai_usage_tenant ON ai_usage(tenant_id, created_at);
 """
 
 
