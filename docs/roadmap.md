@@ -171,6 +171,80 @@ live call (TwiML `<Say>` from the static prompt only).
 - [ ] **Candidate-consent voice cloning / identity checks stay out of scope**
   unless record consents explicitly classify allowed models.
 
+## M9 — Voice Intelligence Suite (in progress, branch `feature/voice-intelligence`)
+
+Integrated voice intelligence: audio enhancement + open-source multilingual
+transcription + observability, per the discovery-first master spec. Discovery
+report (existing-state architecture audit) is complete; every item below keeps
+the capability-honesty contract — no neural/integrated claim without a working
+implementation and measurements.
+
+- [ ] **DSP engine evaluation + selection.** Evaluate WebRTC APM, RNNoise,
+  DeepFilterNet, SpeexDSP against licensing, Rust integration, CPU/memory,
+  quality, latency, sample rates; select (do not install all indiscriminately).
+  Report the comparison in docs.
+- [ ] **Voice Boost engine (Rust, modular DSP).** Noise suppression, echo
+  cancellation where valid render reference exists, AGC without clipping,
+  speech clarity, dynamic EQ, de-essing, loudness normalization, silence/VAD
+  awareness, clipping detection. Insertion point: between
+  `FormatRegistry::convert` and `ChannelRing::push` on the inbound path
+  (media.rs) — ahead of `frame_rms`/VAD/barge-in gates; thresholds
+  re-validated against enhanced audio.
+- [ ] **Voice Boost profiles.** NATURAL / CLEAR / STUDIO presets + independent
+  per-control overrides, global defaults and per-call settings, master
+  switchable off (bypass preserves original audio exactly).
+- [ ] **Open-source multilingual transcription.** WhisperLiveKit + faster-whisper
+  as primary engine (no paid cloud ASR); licenses verified before integration;
+  model-size choice by benchmark on available hardware. Streaming + batch,
+  auto/manual language, partial/final transcripts, timestamps, diarization
+  where supported, optional separate translation (original never silently
+  translated). Language priorities: English, Hindi, Malayalam, Kannada, Tamil,
+  Telugu; code-switching (hi/mal/kn-English mixed) tested explicitly, not assumed.
+- [ ] **Integrated audio pipeline.** Independent inbound (decode → Voice Boost
+  → format adapter → ASR → normalizer → conversation engine) and outbound
+  (agent → TTS → optional enhancement → encode → streams) paths; no mic-style
+  suppression on synthesized speech; no blind AEC on TTS; bounded queues,
+  async processing, per-call session isolation, safe DSP bypass that never
+  terminates a call; correct μ-law/PCM rate handling, minimal conversions.
+- [ ] **Rust audio gateway extensions.** Frame routing, codec adaptation, DSP
+  engine management, transcription session management, per-call config, health
+  monitoring, error recovery, backpressure. Provider-independent seams for
+  enhancement and ASR — no coupling of the call lifecycle to WhisperLiveKit
+  internals.
+- [ ] **React Audio Intelligence dashboard.** Voice Intelligence section in the
+  existing console: Voice Boost panel (profiles, per-control toggles, clipping
+  indicators, engine status), Transcription panel (enable/disable, language +
+  model selectors, live partial/final transcript, detected language, speaker
+  labels, timestamps, translation toggle, latency, model health),
+  Observability panel (call/activation counts, frame processed/dropped,
+  DSP + transcription p50/p95/p99, CPU/RAM/GPU where available, errors,
+  service health). Existing design conventions, no separate app.
+- [ ] **Performance targets with measurements.** <20 ms p95 Voice Boost added
+  latency per frame where achievable; transcription measured separately
+  (time-to-first-partial, final latency, RTF, WER/CER, language-detection
+  accuracy). Concurrency tested at 1/5/10/20 calls where hardware permits.
+  No unbounded queues, no telephony-event-loop blocking, no repeated model
+  loads. Report numbers, never target claims without measurements.
+- [ ] **Docker + deployment.** Rust gateway + Python ASR service + DSP deps +
+  model persistence in Docker/Compose; CPU-only mandatory, NVIDIA optional;
+  health checks, resource limits, startup/shutdown handling.
+- [ ] **Tests.** Voice Boost (noise suppression, AEC where applicable, gain,
+  clipping, silence, frame boundaries, invalid input, codec conversions,
+  bypass, DSP failure, per-call isolation); transcription (en/hi/ml/kn/ta/te,
+  mixed speech, accents, telephone bandwidth, noise, partial/final, timestamps,
+  diarization, reconnection, concurrent sessions); integration (boost on/off ×
+  transcription on/off matrix, DSP failure with transcription continuing, ASR
+  failure with call continuing, full Twilio→AI→TTS flow).
+- [ ] **Security & privacy.** Self-hosted audio + transcripts; no raw caller
+  audio in logs; transcript-retention configuration; per-call session
+  isolation; protected internal WebSockets; documented data handling + consent
+  requirements; secrets outside source control.
+- [ ] **Documentation + final verification report.** Architecture, DSP engine
+  comparison, transcription + language support matrix, pipeline diagrams, API
+  docs, Docker deployment, benchmark reports, troubleshooting, security,
+  licensing inventory; final engineering report with measured results and
+  stated limitations.
+
 ## Explicit non-goals (patterns rejected from competitor adoption)
 
 - Per-session question randomization as the *sole* adaptivity mechanism
