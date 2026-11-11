@@ -134,40 +134,43 @@ verified patterns from competing browser-voice implementations (P3–P6):
 Closes the audit finding that the AI layer currently never participates in a
 live call (TwiML `<Say>` from the static prompt only).
 
-- [ ] **Real STT/TTS chain inside the live session** (M3 open item): streaming
-  STT → OpenRouterAgent turn → streamed TTS, replacing the single-shot Say.
-  Mid-call `instructions` (already persisted, now capability-honest 409)
-  become actionable: scheduler-injected text is spoken at the stream boundary.
-  Acceptance: simulated live session with agent answering; instruction inject
-  mid-session flips spoken content; `mid_call_instructions` capability flips
-  to True for the media backend only.
-- [ ] **STT/TTS provider routing table (P7).** Configurable per-language
-  chain (primary → fallback per language + `mixed` code-switching), each
-  adapter carrying capability metadata + a **verified-quirks registry**
-  (competing implementation documents exact per-language provider failures
-  with dates — adopt the honesty pattern: unverified combinations are labeled
-  UNVERIFIED in status output, never silently attempted).
-- [ ] **Real model_profile dispatch (P8).** `agent.model_profile` currently
-  recorded but routed by env only. Add a model profile table (existing
-  `agents.model_profile` seed) dispatching per task: interview-turn model vs
-  summarize/analyze model; `/api/v1/ai/decide` honors the profile; unknown
-  profile ⇒ 501 with configured list. Usage/cost rows persist per
-  (tenant, profile, model) — audits the interview's token economics and
-  keeps a per-session cost ceiling meaningful (M6 budgets).
-- [ ] **Server-authoritative TTS only (P9).** Live synthesis takes text from
-  the agent/state machine (or approved instruction store); expose no
-  client-controlled arbitrary-text endpoint (pattern provenance: competing
-  practice tool proxies TTS question-by-index server-side).
+- [x] **Real STT/TTS chain inside the live session** (M3 open item): the
+  `LiveTurnEngine` loop is mounted over HTTP for `voice-runtime` sessions —
+  `POST /voice-sessions` opens the live session (agent opening line spoken,
+  session stays in-flight) and `POST /voice-sessions/{id}/turns` drives one
+  turn from caller STT deltas to server-spoken segments; mid-call
+  instructions are drained at the stream boundary and spoken ahead of the
+  agent reply; `mid_call_instructions` stays True for the media backend only.
+  *Still open: the Rust socket transport behind `MediaTransport` (M6 seam);
+  the HTTP seam is exactly what it will call.*
+- [x] **STT/TTS provider routing table (P7).** `voice_providers.py` chains +
+  verified-quirks registry exposed at `GET /api/v1/voice/providers` with the
+  literal `UNVERIFIED` label and `attemptable: false` for unverified
+  combinations (`tests/test_voice_providers.py`). The registry stays empty
+  by design until dated, provenanced field observations exist.
+  *Still open: no real vendor adapters are configured yet (M9).*
+- [x] **Real model_profile dispatch (P8).** `model_profiles` table is seeded
+  config-in-db and actually dispatches: `/api/v1/ai/decide` resolves
+  (profile, task) → model, unknown profile ⇒ 501 with the configured list;
+  usage/cost rows persist per (tenant, profile, task, model) in `ai_usage`
+  for both the decide route (analyze) and the live turn loop (turn).
+- [x] **Server-authoritative TTS only (P9).** No client-controlled
+  arbitrary-text synthesis endpoint exists or was added; spoken content
+  comes exclusively from the agent or the instruction store — pinned by
+  tests (`test_no_arbitrary_text_tts_endpoint`,
+  `test_client_deltas_never_appear_in_spoken_content`).
 
 ## M8 — Integrity signals (P2)
 
-- [ ] **Speech-analytics metadata per call/report (P10).** Cheap ffmpeg-based
-  pause count / words-per-minute / filler-word estimates computed once per
-  finalized transcript and stored on the session; exposed via the outbound
-  contract for downstream report consumers (report ownership stays with the
-  interview layer — this repo only computes and exposes the signals).
-  Acceptance: seeded fixture produces deterministic estimates;
-  absent audio ⇒ field omitted, never zero-fabricated.
+- [x] **Speech-analytics metadata per call/report (P10).** Deterministic
+  estimates (pause count via interior-silence runs ≥ 400 ms, audio-measured
+  words-per-minute, filler-word counts) computed once per finalized
+  transcript at settle, stored in `session_metadata.speech_analytics`, and
+  exposed via the outbound contract (transcript.ready event data + session
+  view). Stdlib WAV decoder (see the ruling in `voice_analytics.py`: ffmpeg
+  absent in this environment/CI). Absent audio ⇒ field omitted, never
+  zero-fabricated. *Still open: applying it to real recorded audio from the
+  telephony callbacks (reference-only URLs today).*
 - [ ] **Candidate-consent voice cloning / identity checks stay out of scope**
   unless record consents explicitly classify allowed models.
 

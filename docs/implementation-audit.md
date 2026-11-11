@@ -171,3 +171,43 @@ $ PYTHONPATH=services/orchestrator/src:services/ai-runtime/src .venv/bin/python 
 - **Honest boundary:** no live-server verification — no Twilio credentials in this environment; dialing additionally requires `VOXORA_ALLOW_LIVE_CALLS=true` (refused otherwise, tested). Provider status reports Twilio `implemented: true, configured: false, live: false` in the default dev setup.
 - Config: `VOXORA_TELEPHONY_PROVIDER=twilio` now requires all of `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`, `TWILIO_TWIML_URL`, `TWILIO_STATUS_CALLBACK_URL` (validated at startup).
 - Suite: 129 Python tests green (both storage backends), ruff + mypy clean, Rust 17 green.
+
+## M7 + M8 completion (2026-11-12, verified this session)
+
+Branch `feature/voice-intelligence`; plan
+`docs/superpowers/plans/2026-11-12-m7-m8-live-loop-routing-analytics.md`.
+
+- **P8 model-profile dispatch**: `/api/v1/ai/decide` resolves
+  (profile, task) → model from the seeded `model_profiles` table; unknown
+  profile ⇒ 501 with the configured list; `ai_usage` rows persist per
+  (tenant, profile, task, model) for decide (analyze) and the live turn
+  loop (turn). Verified: `tests/test_model_profiles.py` (13 tests, SQLite +
+  Postgres).
+- **M7 live turn loop**: `voice-runtime` sessions open in-flight
+  (agent opening line spoken); `POST /voice-sessions/{id}/turns` drives
+  STT deltas → agent turn → spoken segments; mid-call instructions are
+  spoken at the stream boundary (`source: "instruction"`); end keyword
+  settles `completed` + `transcript.ready`; budget counters persist across
+  requests via `completed_turns`/`resumed` engine params; agents gained
+  `rearm()` (OpenRouterAgent re-arms WITHOUT spending an LLM call).
+  Verified: `tests/test_voice_turn_loop_http.py` (13 tests).
+- **P7 routing status**: `GET /api/v1/voice/providers` with literal
+  `UNVERIFIED` labels + `attemptable: false`; found and fixed a real
+  shared-mutable-singleton defect in `LanguageRoutingTable` quirks.
+  Verified: `tests/test_voice_providers.py` (12 tests).
+- **P9 server-authoritative TTS**: pinned by tests — no arbitrary-text TTS
+  route; caller deltas never appear in spoken content; instruction cap 2000.
+- **P10 speech analytics**: deterministic pause/WPM/filler estimates
+  computed once at settle when recorded audio is fetchable (stdlib WAV
+  decoder; ffmpeg absent by ruling); omitted honestly without audio.
+  Verified: `tests/test_voice_analytics.py` (8 tests, both backends).
+- Two real defects fixed along the way: Postgres never received the
+  `voice_sessions.recording_url/recording_sid` columns (migration parity
+  with the SQLite hook), and `conftest._PG_TABLES` truncated neither
+  `voice_sessions` nor several newer tables (stale-row leakage).
+
+Full suite this session: 247 orchestrator tests + 20 ai-runtime tests
+green (SQLite + Postgres); ruff clean; mypy: 3 pre-existing
+import-untyped notes on third-party modules (voxora_voice_runtime,
+pyreverseetl) unchanged. Not verified live: no real telephony, no real
+LLM, no live Squid — unchanged honest boundaries.
