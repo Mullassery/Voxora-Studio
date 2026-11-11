@@ -133,9 +133,6 @@ class VerifiedQuirks:
         return sorted(flat, key=lambda item: item.date)
 
 
-_EMPTY_QUIRKS = VerifiedQuirks()
-
-
 class LanguageRoutingTable:
     """Per-language provider chains plus the reserved `mixed` chain."""
 
@@ -165,7 +162,7 @@ class LanguageRoutingTable:
                     )
                 step_ids.append(step)
             self._chains[key] = step_ids
-        self._quirks = quirks if quirks is not None else _EMPTY_QUIRKS
+        self._quirks = quirks if quirks is not None else VerifiedQuirks()
 
     @property
     def quirks(self) -> VerifiedQuirks:

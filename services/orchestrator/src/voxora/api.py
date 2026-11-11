@@ -1073,6 +1073,27 @@ def create_app(
             "session": _voice_session_view(app, principal, session),
         }
 
+    @app.get("/api/v1/voice/providers")
+    def voice_provider_routing_status(
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        """STT/TTS routing table status (roadmap M7/P7).
+
+        Every (provider, modality, language) combination without a dated,
+        provenanced verified-quirks entry is labeled UNVERIFIED and reports
+        `attemptable: false` — unverified combinations are never silently
+        attempted. The registry starts empty by design.
+        """
+        from .voice_providers import provider_status, routing_table_from_settings
+
+        settings: Settings = app.state.settings
+        configured = bool(settings.voice_provider_adapters or settings.voice_provider_chains)
+        try:
+            status = provider_status(routing_table_from_settings(settings))
+        except ValueError as error:
+            raise ApiError(500, f"voice provider routing config invalid: {error}", "routing_config_invalid") from None
+        return {"configured": configured, **status}
+
     # ------------------------------------------------------------- contacts
     @app.get("/api/v1/contacts")
     def list_contacts(
