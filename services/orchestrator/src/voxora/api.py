@@ -1078,11 +1078,27 @@ def create_app(
         """
         _require_writer(principal)
         settings: Settings = app.state.settings
+        from .model_profiles import (
+            DEFAULT_MODEL_PROFILE,
+            UnknownModelProfileError,
+            resolve_model_profile,
+        )
+
+        profile_name = payload.model_profile or DEFAULT_MODEL_PROFILE
+        try:
+            resolved = resolve_model_profile(app.state.db, principal.tenant_id, profile_name, "analyze")
+        except UnknownModelProfileError as error:
+            raise ApiError(
+                501,
+                str(error),
+                "model_profile_unknown",
+                details={"configured": error.configured, "task": error.task},
+            ) from None
         if settings.llm_provider == "openrouter":
             from voxora_ai.openrouter import OpenRouterError, OpenRouterLLM
 
             try:
-                llm = OpenRouterLLM()
+                llm = OpenRouterLLM(model=resolved["model"])
                 decision = llm.decide(payload.system_prompt, payload.user_prompt)
             except ValueError as error:
                 raise ApiError(501, str(error), "llm_provider_unconfigured") from None
@@ -1091,6 +1107,23 @@ def create_app(
         else:
             llm = None
             decision = _mock_llm_decision(payload.system_prompt, payload.user_prompt)
+        recorded_usage = llm.usage_report() if llm is not None else {
+            "prompt_tokens": 0.0,
+            "completion_tokens": 0.0,
+            "total_tokens": 0.0,
+            "cost_usd": 0.0,
+        }
+        app.state.db.record_ai_usage(
+            principal.tenant_id,
+            profile=resolved["profile"],
+            task="analyze",
+            model=resolved["model"],
+            provider=settings.llm_provider,
+            prompt_tokens=float(recorded_usage.get("prompt_tokens") or 0.0),
+            completion_tokens=float(recorded_usage.get("completion_tokens") or 0.0),
+            total_tokens=float(recorded_usage.get("total_tokens") or 0.0),
+            cost_usd=float(recorded_usage.get("cost_usd") or 0.0),
+        )
         app.state.db.audit(
             principal.tenant_id,
             principal.name,
@@ -1099,19 +1132,19 @@ def create_app(
             None,
             {
                 "provider": settings.llm_provider,
-                "model_profile": payload.model_profile,
+                "model_profile": resolved["profile"],
+                "task": "analyze",
+                "model": resolved["model"],
                 "source": "voxora" if llm is not None else "mock-llm",
             },
         )
         response: Dict[str, Any] = {
             "decision": decision,
             "source": "openrouter" if llm is not None else "mock-llm",
-            "recorded_usage": llm.usage_report() if llm is not None else {
-                "prompt_tokens": 0.0,
-                "completion_tokens": 0.0,
-                "total_tokens": 0.0,
-                "cost_usd": 0.0,
-            },
+            "profile": resolved["profile"],
+            "task": "analyze",
+            "model": resolved["model"],
+            "recorded_usage": recorded_usage,
         }
         return response
 

@@ -532,6 +532,80 @@ class Database:
             ).fetchall()
         return [self._decode(row) for row in rows]
 
+    # --------------------------------------------------------- model profiles
+    def seed_model_profiles(self, tenant_id: str, profiles: Dict[str, Dict[str, str]]) -> None:
+        """Idempotent config-in-db seed of `{profile: {task: model}}` rows."""
+        now = iso()
+        with self._write() as connection:
+            for profile, tasks in profiles.items():
+                for task, model in tasks.items():
+                    connection.execute(
+                        "INSERT OR IGNORE INTO model_profiles"
+                        " (id, tenant_id, profile, task, model, created_at, updated_at)"
+                        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (new_id("mp"), tenant_id, profile, task, model, now, now),
+                    )
+
+    def list_model_profiles(self, tenant_id: str) -> List[Dict[str, Any]]:
+        with self._read() as connection:
+            rows = connection.execute(
+                "SELECT profile, task, model FROM model_profiles WHERE tenant_id=? ORDER BY profile, task",
+                (tenant_id,),
+            ).fetchall()
+        return [self._decode(row) for row in rows]
+
+    def get_model_profile(self, tenant_id: str, profile: str, task: str) -> Optional[Dict[str, Any]]:
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT profile, task, model FROM model_profiles"
+                " WHERE tenant_id=? AND profile=? AND task=?",
+                (tenant_id, profile, task),
+            ).fetchone()
+        return self._decode(row) if row else None
+
+    # --------------------------------------------------------------- ai usage
+    def record_ai_usage(
+        self,
+        tenant_id: str,
+        *,
+        profile: Optional[str],
+        task: str,
+        model: str,
+        provider: str,
+        prompt_tokens: float = 0.0,
+        completion_tokens: float = 0.0,
+        total_tokens: float = 0.0,
+        cost_usd: float = 0.0,
+    ) -> None:
+        with self._write() as connection:
+            connection.execute(
+                "INSERT INTO ai_usage"
+                " (id, tenant_id, profile, task, model, provider, prompt_tokens,"
+                "  completion_tokens, total_tokens, cost_usd, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    new_id("aiu"),
+                    tenant_id,
+                    profile,
+                    task,
+                    model,
+                    provider,
+                    float(prompt_tokens),
+                    float(completion_tokens),
+                    float(total_tokens),
+                    float(cost_usd),
+                    iso(),
+                ),
+            )
+
+    def list_ai_usage(self, tenant_id: str, limit: int = 100) -> List[Dict[str, Any]]:
+        with self._read() as connection:
+            rows = connection.execute(
+                "SELECT * FROM ai_usage WHERE tenant_id=? ORDER BY created_at DESC, id DESC LIMIT ?",
+                (tenant_id, limit),
+            ).fetchall()
+        return [self._decode(row) for row in rows]
+
     # ----------------------------------------------------------------- tenant
     def ensure_tenant(self, tenant_id: str, name: str) -> None:
         with self._write() as connection:

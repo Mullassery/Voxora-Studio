@@ -38,10 +38,13 @@ Honesty contract, matching the codebase's simulation-only pattern:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
 from .db import Database
+
+logger = logging.getLogger(__name__)
 
 # TurnTiming-shaped stage keys (snake_case), shared with the Rust bridge's
 # latency vocabulary (crates/voice-runtime: audioReceived -> agentResponse ->
@@ -322,6 +325,37 @@ class LiveTurnEngine:
             report = usage()
             if isinstance(report, dict):
                 self._usage = {**self._usage, **report}
+                self._record_usage_row(report)
+
+    def _record_usage_row(self, report: Dict[str, Any]) -> None:
+        """Persist one ai_usage row per turn task (P8 token economics).
+
+        Never breaks the live call: profile resolution failure (unknown
+        profile row) or a storage hiccup only costs the analytics row,
+        which is the honest outcome — the session is the primary record.
+        """
+        try:
+            from .model_profiles import resolve_model_profile
+
+            resolved = resolve_model_profile(
+                self.db,
+                self.tenant_id,
+                (self._session().get("model_profile") or None),
+                "turn",
+            )
+            self.db.record_ai_usage(
+                self.tenant_id,
+                profile=resolved["profile"],
+                task="turn",
+                model=resolved["model"],
+                provider=str(getattr(self.agent, "provider", "mock")),
+                prompt_tokens=float(report.get("prompt_tokens") or 0.0),
+                completion_tokens=float(report.get("completion_tokens") or 0.0),
+                total_tokens=float(report.get("total_tokens") or 0.0),
+                cost_usd=float(report.get("cost_usd") or 0.0),
+            )
+        except Exception:  # noqa: BLE001 - analytics must not kill the call
+            logger.exception("ai_usage row recording failed for session %s", self.session_id)
 
     def _usage_extra(self) -> Dict[str, float]:
         return dict(getattr(self, "_usage", {}) or {})

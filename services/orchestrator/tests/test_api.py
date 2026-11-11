@@ -398,16 +398,34 @@ def test_ai_decide_openrouter_success_records_provider_and_usage(
         lambda self: {"prompt_tokens": 30.0, "completion_tokens": 12.0, "total_tokens": 42.0, "cost_usd": 0.0007},
     )
     with _openrouter_client(monkeypatch, tmp_path, api_key="sk-or-secret") as scoped:
-        response = scoped.post(
-            "/api/v1/ai/decide", json={**_decide_payload(), "model_profile": "interview_default"}, headers=AUTH
-        )
+        response = scoped.post("/api/v1/ai/decide", json=_decide_payload(), headers=AUTH)
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["source"] == "openrouter"
     assert body["decision"] == {"next_action": "probe", "is_complete": False}
     assert body["recorded_usage"]["cost_usd"] == 0.0007
+    assert body["profile"] == "default"
+    assert body["task"] == "analyze"
     assert captured["prompts"] == ("You are an interviewer.", "Assess the reply.")
     audit = scoped.get("/api/v1/audit", headers=AUTH).json()["data"]
     decide_rows = [row for row in audit if row["action"] == "ai.decide"]
     assert decide_rows[0]["metadata"]["provider"] == "openrouter"
-    assert decide_rows[0]["metadata"]["model_profile"] == "interview_default"
+    assert decide_rows[0]["metadata"]["model_profile"] == "default"
+    assert decide_rows[0]["metadata"]["model"] == "test/model"
+
+
+def test_ai_decide_unknown_profile_is_501_with_configured_list(
+    client, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    pytest.importorskip("voxora_ai")
+    from voxora_ai.openrouter import OpenRouterLLM
+
+    monkeypatch.setattr(OpenRouterLLM, "decide", lambda self, s, u, **kw: {})
+    with _openrouter_client(monkeypatch, tmp_path, api_key="sk-or-secret") as scoped:
+        response = scoped.post(
+            "/api/v1/ai/decide", json={**_decide_payload(), "model_profile": "interview_default"}, headers=AUTH
+        )
+    assert response.status_code == 501
+    body = response.json()
+    assert body["error"]["code"] == "model_profile_unknown"
+    assert "default" in body["error"]["details"]["configured"]

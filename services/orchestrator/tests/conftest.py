@@ -18,6 +18,7 @@ from voxora.db import Database
 _PG_URL = os.environ.get("VOXORA_TEST_PG_URL", "postgresql://localhost:5432/voxora_ci")
 
 _PG_TABLES = [
+    "ai_usage",
     "call_events",
     "call_latency",
     "calls",
@@ -29,10 +30,13 @@ _PG_TABLES = [
     "crm_connections",
     "crm_field_mappings",
     "crm_sync_jobs",
+    "model_profiles",
     "suppression_list",
     "tenants",
     "voice_session_checkpoints",
+    "voice_session_deliveries",
     "voice_session_events",
+    "voice_session_instructions",
     "webhook_events",
 ]
 
