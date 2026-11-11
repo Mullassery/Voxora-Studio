@@ -9,7 +9,11 @@ license.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-[dev-dependencies]
+# Voice Boost noise suppression: pure-Rust RNNoise port, weights embedded.
+# Library-only build (default features drag in binary/dasp deps).
+[dependencies.nnnoiseless]
+version = "0.5"
+default-features = false
 
 [features]
 # Gated PyO3 bindings so plain `cargo build`/`cargo test` never needs pyo3;

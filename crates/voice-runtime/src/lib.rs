@@ -10,6 +10,7 @@
 pub mod barge_in;
 pub mod bridge;
 pub mod controller;
+pub mod dsp;
 pub mod endpointing;
 pub mod media;
 pub mod semantic;

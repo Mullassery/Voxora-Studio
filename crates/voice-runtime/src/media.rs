@@ -24,7 +24,7 @@
 //!   errors instead of silently picking a fallback.
 
 use std::collections::VecDeque;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Audio encoding carried inside a [`MediaFormat`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -442,6 +442,10 @@ pub struct MediaBridge<'a> {
     pub assembler: UtteranceAssembler,
     /// Per-hop latency counters, readable at any time.
     pub tracker: HopLatency,
+    /// Voice Boost stage (M9). `None` = disabled ⇒ original audio preserved
+    /// exactly; the insertion point is between decode and the jitter ring,
+    /// ahead of RMS/VAD/barge-in gates (thresholds re-validated in dsp tests).
+    pub voice_boost: Option<crate::dsp::VoiceBoostStage>,
     /// Decider hook (M7 mounts the live model turn here).
     pub decider: Box<dyn FnMut(&Utterance) -> String>,
     transport: Box<dyn MediaTransport>,
@@ -462,6 +466,7 @@ impl<'a> MediaBridge<'a> {
             ring: ChannelRing::new(ring_capacity),
             assembler: UtteranceAssembler::new(0.01, 2),
             tracker: HopLatency::default(),
+            voice_boost: None,
             decider: Box::new(|u: &Utterance| {
                 format!("Acknowledged; your turn was {} samples of audio.", u.pcm.len())
             }),
@@ -469,6 +474,13 @@ impl<'a> MediaBridge<'a> {
             upstream,
             engine,
         }
+    }
+
+    /// Mount a Voice Boost stage on the inbound path (bypass flag lives in
+    /// the stage config; None here means Voice Boost is entirely off).
+    pub fn with_voice_boost(mut self, stage: crate::dsp::VoiceBoostStage) -> Self {
+        self.voice_boost = Some(stage);
+        self
     }
 
     /// Ride one inbound wire frame: decode, buffer, assemble; when the
@@ -483,6 +495,36 @@ impl<'a> MediaBridge<'a> {
     ) -> Result<usize, MediaError> {
         let decoded = self.registry.convert(self.upstream, self.engine, payload)?;
         self.tracker.record("user_in_decode", wire_dt);
+        // Voice Boost (M9): between decode and the jitter ring, ahead of
+        // frame_rms/VAD/barge-in gating. Disabled ⇒ byte-identical path.
+        let dsp_bypass = self
+            .voice_boost
+            .as_ref()
+            .map_or(true, |vb| vb.config.bypass);
+        let decoded = if dsp_bypass {
+            decoded
+        } else {
+            // Registry output is little-endian PCM16 bytes; run DSP on the
+            // sample view and hand the ring back encoded bytes.
+            let samples: Vec<i16> = decoded
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| i16::from_le_bytes(*c))
+                .collect();
+            let t0 = Instant::now();
+            let frame = self
+                .voice_boost
+                .as_mut()
+                .map(|vb| vb.process(&samples))
+                .expect("dsp_bypass checked");
+            self.tracker.record("user_in_dsp", t0.elapsed());
+            frame
+                .pcm
+                .iter()
+                .flat_map(|s| s.to_le_bytes())
+                .collect::<Vec<u8>>()
+        };
         self.ring.push(decoded);
         let chunk = self.ring.drain().into_iter().next().unwrap_or_default();
         let samples: Vec<i16> = chunk
