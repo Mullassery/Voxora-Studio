@@ -113,11 +113,31 @@ def settle_voice_session(
     )
     transcript = session.get("transcript") or []
     if status == "completed" and transcript and prior != "completed":
+        from .voice_analytics import compute_speech_analytics
+
+        ready_data: Dict[str, Any] = {"transcript_available": True}
+        recording_url = session.get("recording_url")
+        if recording_url:
+            # Speech analytics (M8/P10): computed once, on the finalize
+            # tick, only when the recorded audio is actually fetchable.
+            # Absent/unfetchable audio ⇒ the key stays absent — the field
+            # is never zero-fabricated.
+            try:
+                with TRANSPORT(recording_url, timeout=5) as response:  # type: ignore[operator]
+                    audio = response.read()
+            except Exception:  # noqa: BLE001 - omission is the honest outcome
+                audio = None
+            analytics = compute_speech_analytics(transcript, audio)
+            if analytics is not None:
+                db.update_voice_session_metadata(
+                    tenant_id, session["id"], {"speech_analytics": analytics}
+                )
+                ready_data["speech_analytics"] = analytics
         db.record_voice_session_event(
             tenant_id,
             session["id"],
             "transcript.ready",
-            {"transcript_available": True},
+            ready_data,
         )
     return status
 

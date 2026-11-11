@@ -226,6 +226,7 @@ def _voice_session_view(
             for event in events
         ],
         "webhook_url": session["webhook_url"],
+        "session_metadata": session.get("session_metadata") or {},
         "created_at": session["created_at"],
         "updated_at": session["updated_at"],
     }

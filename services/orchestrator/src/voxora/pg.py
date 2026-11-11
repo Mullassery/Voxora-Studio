@@ -109,3 +109,11 @@ class PostgresDatabase(Database):
                 ("audience_version", "TEXT"),
             ):
                 connection.execute(f"ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS {column} {definition}")  # noqa: S608 - fixed internal names
+            # Voice-session recording references (parity with the SQLite
+            # `_migrate_voice_sessions` hook): databases created before the
+            # recording-callback feature need the same columns on Postgres.
+            for column, definition in (
+                ("recording_url", "TEXT"),
+                ("recording_sid", "TEXT"),
+            ):
+                connection.execute(f"ALTER TABLE voice_sessions ADD COLUMN IF NOT EXISTS {column} {definition}")  # noqa: S608 - fixed internal names

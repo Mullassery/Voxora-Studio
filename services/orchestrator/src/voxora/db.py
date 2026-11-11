@@ -932,6 +932,26 @@ class Database:
             )
         return self.get_voice_session(tenant_id, session_id)
 
+    def update_voice_session_metadata(
+        self, tenant_id: str, session_id: str, patch: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """JSON-merge a patch into `session_metadata` under the write lock."""
+        with self._write() as connection:
+            row = connection.execute(
+                "SELECT session_metadata FROM voice_sessions WHERE tenant_id=? AND id=?",
+                (tenant_id, session_id),
+            ).fetchone()
+            if row is None:
+                raise LookupError("voice session not found")
+            # Row shapes differ per backend: dict rows (Postgres) vs tuple rows (SQLite).
+            raw = row.get("session_metadata") if isinstance(row, dict) else row[0]
+            merged = {**(json.loads(raw or "{}")), **patch}
+            connection.execute(
+                "UPDATE voice_sessions SET session_metadata=?, updated_at=? WHERE tenant_id=? AND id=?",
+                (json.dumps(merged), iso(), tenant_id, session_id),
+            )
+        return merged
+
     def record_voice_session_event(
         self,
         tenant_id: str,
