@@ -34,6 +34,7 @@ from .models import (
     MappingsUpdate,
     RecipientAdd,
     SessionInstruction,
+    SttDeltas,
     SuppressionCreate,
     TurnAgentEvent,
     TurnAudioFrame,
@@ -780,6 +781,29 @@ def create_app(
         from .voice_sessions import dispatch_pending_webhooks
 
         dispatch_pending_webhooks(app.state.db, app.state.settings, tenant_id, session["id"])
+        if app.state.settings.telephony_provider == "voice-runtime":
+            # M7 live loop: the media backend owns the call; the session
+            # opens with the agent's spoken line and STAYS in flight —
+            # turns advance via POST /voice-sessions/{id}/turns.
+            from .voice_turn_loop import LiveTurnEngine, build_agent
+
+            app.state.db.update_call(tenant_id, call["id"], target="dialing")
+            app.state.db.update_call(tenant_id, call["id"], target="in_progress")
+            try:
+                live_agent = build_agent(
+                    app.state.settings.llm_provider, agent_row.get("system_prompt", "")
+                )
+            except ValueError as error:
+                raise ApiError(501, str(error), "llm_provider_unconfigured") from None
+            engine = LiveTurnEngine(app.state.db, tenant_id, session["id"], live_agent, settings=app.state.settings)
+            engine.start()
+            session = app.state.db.update_voice_session(tenant_id, session["id"], status="in_flight")
+            app.state.db.record_voice_session_event(
+                tenant_id, session["id"], "voice_session.in_flight", {"call_id": call["id"]}
+            )
+            dispatch_pending_webhooks(app.state.db, app.state.settings, tenant_id, session["id"])
+            session = app.state.db.get_voice_session(tenant_id, session["id"]) or session
+            return _voice_session_view(app, principal, session)
         from .campaign import CampaignEngine
 
         engine = app.state.engine
@@ -960,6 +984,93 @@ def create_app(
             "provider_capabilities": capabilities,
             "applied": False,
             "recorded": True,
+        }
+
+    @app.post("/api/v1/voice-sessions/{session_id}/turns")
+    def run_voice_session_turn(
+        session_id: str,
+        payload: SttDeltas,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        """One live-loop turn: caller STT deltas in, server-spoken reply out.
+
+        The media backend (voice-runtime) drives the session; caller deltas
+        are transcript hypotheses only — spoken content comes exclusively
+        from the agent or the instruction store (server-authoritative TTS).
+        Mid-call instructions are drained at the stream boundary and spoken
+        ahead of the agent reply.
+        """
+        _require_writer(principal)
+        tenant_id = principal.tenant_id
+        session = app.state.db.get_voice_session(tenant_id, session_id)
+        if not session:
+            raise ApiError(404, "Voice session not found", "unknown_session")
+        if app.state.settings.telephony_provider != "voice-runtime":
+            raise ApiError(
+                409,
+                (
+                    f"Provider '{app.state.settings.telephony_provider}' does not drive the live "
+                    "turn loop; only the media backend (voice-runtime) does."
+                ),
+                "turn_loop_unsupported",
+                details={"provider_capabilities": _telephony_capabilities(app.state.settings)},
+            )
+        if session["status"] in {"completed", "busy", "no_answer", "failed", "terminated"}:
+            raise ApiError(409, "The live session is no longer active", "session_not_active")
+        agent_row = app.state.db.get_agent(tenant_id, session["agent_id"])
+        if not agent_row:
+            raise ApiError(404, "Agent not found", "agent_not_found")
+        from .voice_turn_loop import (
+            TURN_COMPLETED_EVENT,
+            LiveTurnEngine,
+            VoiceTurnLoopError,
+            build_agent,
+        )
+
+        try:
+            live_agent = build_agent(
+                app.state.settings.llm_provider, agent_row.get("system_prompt", "")
+            )
+        except ValueError as error:
+            raise ApiError(501, str(error), "llm_provider_unconfigured") from None
+        completed_turns = sum(
+            1
+            for event in app.state.db.list_voice_session_events(tenant_id, session_id)
+            if event["event_type"] == TURN_COMPLETED_EVENT
+        )
+        engine = LiveTurnEngine(
+            app.state.db,
+            tenant_id,
+            session_id,
+            live_agent,
+            settings=app.state.settings,
+            completed_turns=completed_turns,
+            resumed=session["status"] == "in_flight",
+        )
+        if session["status"] in {"created", "queued"}:
+            engine.start()
+        for delta in payload.deltas:
+            engine.ingest_delta(delta)
+        try:
+            result = engine.finish_stream()
+        except VoiceTurnLoopError as error:
+            raise ApiError(409, str(error), "session_not_active") from None
+        if result.ended or result.terminated is not None:
+            from .voice_sessions import dispatch_pending_webhooks
+
+            dispatch_pending_webhooks(app.state.db, app.state.settings, tenant_id, session_id)
+        session = app.state.db.get_voice_session(tenant_id, session_id) or session
+        return {
+            "turn": {
+                "turn_index": result.turn_index,
+                "user_text": result.user_text,
+                "spoken_segments": result.spoken_segments,
+                "instruction_ids": result.instruction_ids,
+                "ended": result.ended,
+                "terminated": result.terminated,
+                "latency_ms": result.latency_ms,
+            },
+            "session": _voice_session_view(app, principal, session),
         }
 
     # ------------------------------------------------------------- contacts

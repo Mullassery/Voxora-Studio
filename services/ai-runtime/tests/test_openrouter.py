@@ -285,3 +285,14 @@ def test_llm_decide_round_trip_pins_route_contract(monkeypatch: pytest.MonkeyPat
     assert captured["body"]["temperature"] == 0.2
     usage = llm.usage_report()
     assert usage["total_tokens"] == 42.0 and usage["cost_usd"] == 0.0007
+
+
+def test_rearm_resumes_without_calling_the_llm(monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden(request: httpx.Request) -> httpx.Response:  # pragma: no cover
+        raise AssertionError("rearm() must not spend an LLM call")
+
+    agent = build_agent(make_client(monkeypatch, forbidden))
+    agent.rearm()
+    assert agent._started is True
+    assert agent._turn == 0
+    assert agent._history == []

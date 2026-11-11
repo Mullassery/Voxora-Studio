@@ -104,6 +104,29 @@ class VoiceSessionCreate(BaseModel):
     webhook_url: Optional[str] = Field(default=None, max_length=2000)
 
 
+class SttDeltas(BaseModel):
+    """One caller utterance as STT transcript deltas (media-backend seam).
+
+    These are caller-side speech hypotheses only — the client never sends
+    text for the assistant to speak (server-authoritative TTS, roadmap
+    M7/P9). Spoken content comes exclusively from the agent or the
+    instruction store.
+    """
+
+    model_config = {"extra": "forbid"}
+    deltas: List[str] = Field(min_length=1, max_length=20)
+
+    @field_validator("deltas")
+    @classmethod
+    def _deltas_are_speech_hypotheses(cls, value: List[str]) -> List[str]:
+        for delta in value:
+            if not delta.strip():
+                raise ValueError("each delta must be a non-empty string")
+            if len(delta) > 2000:
+                raise ValueError("each delta must be at most 2000 characters")
+        return value
+
+
 class SessionInstruction(BaseModel):
     """Mid-call instruction; delivery depends on provider capabilities."""
 

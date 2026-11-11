@@ -69,3 +69,15 @@ def test_latency_is_deterministic_and_hash_derived() -> None:
     digest = hashlib.sha256(first.text.encode("utf-8")).digest()
     expected = 120.0 + digest[0] % 330
     assert first.latency_simulated_ms == expected
+
+
+def test_rearm_resumes_script_without_repeating_the_opening_line() -> None:
+    agent = voxora_ai.MockAgent()
+    agent.start()
+    agent.respond("yes")
+    agent.rearm()
+    reply = agent.respond("go on")
+    # A resumed session must NOT re-speak script[0]; the caller already heard it.
+    assert reply.text != "Hello, this is a simulated call from Voxora Studio. Am I reaching you?"
+    assert reply.turn_index == 2
+    assert reply.ended is False

@@ -154,3 +154,26 @@ def client(settings: Settings) -> TestClient:
     app = create_app(settings)
     with TestClient(app) as test_client:
         yield test_client
+
+
+@pytest.fixture
+def voice_runtime_client(tmp_path: Path) -> TestClient:
+    settings = Settings(
+        env="test",
+        database_path=str(tmp_path / "live.db"),
+        secret_key="unit-test-secret-key-must-be-32-chars",
+        outbound_webhook_secret="unit-test-outbound-webhook-secret-0123456789",
+        webhook_transport="pyreverseetl",
+        webhook_dead_letter_path=str(tmp_path / "webhook-dead-letter.jsonl"),
+        api_tokens={
+            "admin-token": TenantPrincipal("tenant-a", "admin", "Admin"),
+            "viewer-token": TenantPrincipal("tenant-a", "viewer", "Viewer"),
+        },
+        cors_origins=["http://localhost:5173"],
+        worker_enabled=False,
+        simulated_call_delay_seconds=0.0,
+        telephony_provider="voice-runtime",
+    )
+    app = create_app(settings)
+    with TestClient(app) as test_client:
+        yield test_client

@@ -154,6 +154,8 @@ class LiveTurnEngine:
         agent: TurnAgent,
         *,
         settings: Optional[Any] = None,
+        completed_turns: int = 0,
+        resumed: bool = False,
     ) -> None:
         self.db = db
         self.tenant_id = tenant_id
@@ -161,9 +163,19 @@ class LiveTurnEngine:
         self.agent = agent
         self._settings = settings
         self._buffer: List[str] = []
-        self._started = False
+        # A resumed engine (fresh process, in-flight session) skips start():
+        # the opening line was already spoken by the request that created it.
+        # The agent seam is re-armed WITHOUT re-speaking that line (rearm()
+        # when available, else a discarded start() for scripted agents).
+        self._started = bool(resumed)
+        if resumed:
+            rearm = getattr(agent, "rearm", None)
+            if callable(rearm):
+                rearm()
+            else:
+                agent.start()
         self._done = False
-        self.completed_turns = 0
+        self.completed_turns = completed_turns
         self._usage: Dict[str, float] = {}
         self._spoken_instruction_ids: set = set()
 

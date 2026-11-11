@@ -190,6 +190,17 @@ class OpenRouterAgent:
         self._history = []
         return self._decide("The call just connected. Say your opening line.")
 
+    def rearm(self) -> None:
+        """Re-arm for a resumed live session without spending an LLM call.
+
+        The opening line was already spoken (and is in the persisted
+        transcript); resume only restores agent state so the next
+        `respond()` continues the conversation.
+        """
+        self._started = True
+        self._turn = 0
+        self._history = []
+
     def respond(self, user_text: str) -> AgentReply:
         if not self._started:
             raise AgentTurnError("call has not been started; call start() first")

@@ -88,6 +88,16 @@ class MockAgent:
         self._started = True
         return self._reply()
 
+    def rearm(self) -> None:
+        """Re-arm for a resumed live session; no reply is (re-)spoken.
+
+        The opening line already went out when the session first started;
+        resume only restores the script position so the next `respond`
+        continues the script instead of repeating it.
+        """
+        self._turn = 0
+        self._started = True
+
     def respond(self, user_text: str) -> AgentReply:
         if not self._started:
             raise AgentTurnError("call has not been started; call start() first")
