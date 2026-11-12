@@ -383,7 +383,7 @@ class LiveTurnEngine:
         if user_text:
             entries.append({"role": "user", "text": user_text})
         for index, segment in enumerate(segments):
-            entry: Dict[str, Any] = {"role": "assistant", "text": segment}
+            entry: Dict[str, Any] = {"role": "agent", "text": segment}
             source = "agent"
             instruction = instructions[index] if index < len(instructions) else None
             if instruction is not None:

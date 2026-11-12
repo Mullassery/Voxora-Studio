@@ -83,7 +83,7 @@ def test_create_voice_runtime_session_starts_live_loop(voice_runtime_client: Tes
         f"/api/v1/voice-sessions/{body['session_id']}/transcript", headers=HEADERS
     ).json()
     assert transcript["transcript_available"] is True
-    assert transcript["entries"][0]["role"] == "assistant"
+    assert transcript["entries"][0]["role"] == "agent"
     assert transcript["entries"][0]["text"] == _MOCK_SCRIPT[0]
     event_types = [event["event_type"] for event in body["events"]]
     assert "voice_session.in_flight" in event_types
@@ -107,7 +107,7 @@ def test_turn_endpoint_returns_agent_reply_and_persists(voice_runtime_client: Te
     ).json()
     user_entries = [entry for entry in transcript["entries"] if entry["role"] == "user"]
     assert user_entries[-1]["text"] == "yes this is"
-    assistant_entries = [entry for entry in transcript["entries"] if entry["role"] == "assistant"]
+    assistant_entries = [entry for entry in transcript["entries"] if entry["role"] == "agent"]
     assert assistant_entries[-1]["source"] == "agent"
     event_types = [event["event_type"] for event in response.json()["session"]["events"]]
     assert "voice_session.turn_completed" in event_types
@@ -285,7 +285,7 @@ def test_client_deltas_never_appear_in_spoken_content(voice_runtime_client: Test
     ).json()
     user_entries = [entry for entry in transcript["entries"] if entry["role"] == "user"]
     assert any(injection in entry["text"] for entry in user_entries)  # it IS the caller transcript
-    spoken = [entry for entry in transcript["entries"] if entry["role"] == "assistant"]
+    spoken = [entry for entry in transcript["entries"] if entry["role"] == "agent"]
     assert all(injection not in entry["text"] for entry in spoken)
     assert all(entry["source"] in {"agent", "instruction"} for entry in spoken)
 
