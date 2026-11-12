@@ -117,6 +117,9 @@ class PostgresDatabase(Database):
                 ("recording_sid", "TEXT"),
             ):
                 connection.execute(f"ALTER TABLE voice_sessions ADD COLUMN IF NOT EXISTS {column} {definition}")  # noqa: S608 - fixed internal names
+            # Provider-specific connection config (e.g. LeadConnector's
+            # location_id) — parity with the SQLite `_migrate_crm_connections`.
+            connection.execute("ALTER TABLE crm_connections ADD COLUMN IF NOT EXISTS config TEXT NOT NULL DEFAULT '{}'")
 
     # multi-worker claiming (roadmap M4a) ---------------------------------
     # Postgres runs READ COMMITTED with no writer serialization, so

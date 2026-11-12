@@ -1,0 +1,644 @@
+{
+  "Cargo.toml": {
+    "mtime": 1793326159.084001,
+    "seen": 1794442394.266512,
+    "ast_hash": "3077e9a61761d8eeec7d28bc8bade531",
+    "semantic_hash": ""
+  },
+  "apps/console/package.json": {
+    "mtime": 1793408708.848473,
+    "seen": 1794442394.2665138,
+    "ast_hash": "232ae9e0369bca690317436d2e9c8559",
+    "semantic_hash": ""
+  },
+  "apps/console/src/App.tsx": {
+    "mtime": 1794271413.6341588,
+    "seen": 1794442394.266515,
+    "ast_hash": "07067eb6177055416a1d055f8144dd3e",
+    "semantic_hash": ""
+  },
+  "apps/console/src/api.ts": {
+    "mtime": 1794271374.5996506,
+    "seen": 1794442394.266516,
+    "ast_hash": "ee807ec7b031fb13db337a879f3655ad",
+    "semantic_hash": ""
+  },
+  "apps/console/src/generated/apiTypes.ts": {
+    "mtime": 1793442959.7106652,
+    "seen": 1794442394.266516,
+    "ast_hash": "2f62b3fca2223bde8a9e13b08a5f7507",
+    "semantic_hash": ""
+  },
+  "apps/console/src/generated/paths.ts": {
+    "mtime": 1793442959.710858,
+    "seen": 1794442394.266517,
+    "ast_hash": "3ae9cf5c8a61c170e51a35ba62a35c61",
+    "semantic_hash": ""
+  },
+  "apps/console/src/main.tsx": {
+    "mtime": 1793408638.340302,
+    "seen": 1794442394.266517,
+    "ast_hash": "2436b9ba8bc267839144ff72815a9826",
+    "semantic_hash": ""
+  },
+  "apps/console/tsconfig.json": {
+    "mtime": 1793408619.104916,
+    "seen": 1794442394.266518,
+    "ast_hash": "0c45bf74c871c5a0a3bafaf05d60b299",
+    "semantic_hash": ""
+  },
+  "apps/console/vite.config.ts": {
+    "mtime": 1793408611.7039707,
+    "seen": 1794442394.266518,
+    "ast_hash": "4e5d820c144bb2ff5ab0367be244afca",
+    "semantic_hash": ""
+  },
+  "crates/voice-runtime/Cargo.toml": {
+    "mtime": 1794276986.016658,
+    "seen": 1794442394.266518,
+    "ast_hash": "b96dbbf24b2d6b2ac8c2edb3134459e6",
+    "semantic_hash": ""
+  },
+  "crates/voice-runtime/pyproject.toml": {
+    "mtime": 1793542263.1968315,
+    "seen": 1794442394.266519,
+    "ast_hash": "f462604306b9472bcebf890dde468807",
+    "semantic_hash": ""
+  },
+  "crates/voice-runtime/src/barge_in.rs": {
+    "mtime": 1794201063.4018736,
+    "seen": 1794442394.266519,
+    "ast_hash": "30c87f8173ebe707cd9e57b65f04115d",
+    "semantic_hash": ""
+  },
+  "crates/voice-runtime/src/bridge.rs": {
+    "mtime": 1793542069.5167108,
+    "seen": 1794442394.266519,
+    "ast_hash": "26fb33595c672786ea91c22bd33fed42",
+    "semantic_hash": ""
+  },
+  "crates/voice-runtime/src/controller.rs": {
+    "mtime": 1794270978.5552804,
+    "seen": 1794442394.26652,
+    "ast_hash": "bfd33e20f4a04f5b65c02cab9ea1d547",
+    "semantic_hash": ""
+  },
+  "crates/voice-runtime/src/dsp.rs": {
+    "mtime": 1794358397.5033665,
+    "seen": 1794442394.26652,
+    "ast_hash": "d89a65ef1bb2071e6ca712849539fbe4",
+    "semantic_hash": ""
+  },
+  "crates/voice-runtime/src/endpointing.rs": {
+    "mtime": 1794270978.5556169,
+    "seen": 1794442394.266521,
+    "ast_hash": "f97207bd97291ffbefa4bff19fc65934",
+    "semantic_hash": ""
+  },
+  "crates/voice-runtime/src/lib.rs": {
+    "mtime": 1794276993.3914795,
+    "seen": 1794442394.266521,
+    "ast_hash": "156362cb1bdf6413a6cee2b981bdf061",
+    "semantic_hash": ""
+  },
+  "crates/voice-runtime/src/media.rs": {
+    "mtime": 1794358184.1897566,
+    "seen": 1794442394.266521,
+    "ast_hash": "80eb3deca4abe0a8268a970987961e48",
+    "semantic_hash": ""
+  },
+  "crates/voice-runtime/src/pybridge.rs": {
+    "mtime": 1794271480.310207,
+    "seen": 1794442394.2665222,
+    "ast_hash": "95912e97a6f86b4aa66989cef733a667",
+    "semantic_hash": ""
+  },
+  "crates/voice-runtime/src/semantic.rs": {
+    "mtime": 1794199991.3013988,
+    "seen": 1794442394.2665222,
+    "ast_hash": "89b1cbaa77428f85fd4036ec07c58f12",
+    "semantic_hash": ""
+  },
+  "crates/voice-runtime/src/td_events.rs": {
+    "mtime": 1794200123.4073594,
+    "seen": 1794442394.266523,
+    "ast_hash": "c70d599a5bf2148c7d606c1b692d5ce2",
+    "semantic_hash": ""
+  },
+  "crates/voice-runtime/src/turn.rs": {
+    "mtime": 1793408417.2533076,
+    "seen": 1794442394.266523,
+    "ast_hash": "98313e764fce40956cfbef7c658bcba4",
+    "semantic_hash": ""
+  },
+  "crates/voice-runtime/src/vad.rs": {
+    "mtime": 1794270978.5559604,
+    "seen": 1794442394.2665238,
+    "ast_hash": "8a8fe95cfcc6c2f8578b3b38ec1f2a5c",
+    "semantic_hash": ""
+  },
+  "crates/voice-runtime/src/wav.rs": {
+    "mtime": 1793408516.1578217,
+    "seen": 1794442394.2665238,
+    "ast_hash": "158ad9a9e245bb2a04632c721b0b245b",
+    "semantic_hash": ""
+  },
+  "pyproject.toml": {
+    "mtime": 1794271459.8198361,
+    "seen": 1794442394.2665238,
+    "ast_hash": "3300fb683e044f1e766f91049508259a",
+    "semantic_hash": ""
+  },
+  "services/ai-runtime/pyproject.toml": {
+    "mtime": 1793544057.8000548,
+    "seen": 1794442394.266525,
+    "ast_hash": "3f56c448a219c6cabed3fdb5ba24540d",
+    "semantic_hash": ""
+  },
+  "services/ai-runtime/src/voxora_ai/__init__.py": {
+    "mtime": 1793666710.1344712,
+    "seen": 1794442394.266525,
+    "ast_hash": "0d7e25b029438a9d61ce0948a38c55de",
+    "semantic_hash": ""
+  },
+  "services/ai-runtime/src/voxora_ai/engine.py": {
+    "mtime": 1794434251.3724058,
+    "seen": 1794442394.266526,
+    "ast_hash": "66d7734d3e45bfd6e73723cabcdab0b7",
+    "semantic_hash": ""
+  },
+  "services/ai-runtime/src/voxora_ai/openrouter.py": {
+    "mtime": 1794434257.2440479,
+    "seen": 1794442394.266526,
+    "ast_hash": "92823019af159f3a7b51d316f7f788e7",
+    "semantic_hash": ""
+  },
+  "services/ai-runtime/tests/test_engine.py": {
+    "mtime": 1794433255.821169,
+    "seen": 1794442394.266526,
+    "ast_hash": "745e756ecf08f3047d7771381ee2912c",
+    "semantic_hash": ""
+  },
+  "services/ai-runtime/tests/test_openrouter.py": {
+    "mtime": 1794433255.82479,
+    "seen": 1794442394.266527,
+    "ast_hash": "f8e8f2f5c28f450ca235b527490c6103",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/pyproject.toml": {
+    "mtime": 1794271436.6956966,
+    "seen": 1794442394.266527,
+    "ast_hash": "aecc88d43f5bedb77584ae9ebd5d3bfa",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/scripts/generate_ts_client.py": {
+    "mtime": 1793442959.4368432,
+    "seen": 1794442394.266527,
+    "ast_hash": "c1791682cfe3582dc3bdc2f9ece172bc",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/src/voxora/__init__.py": {
+    "mtime": 1793326190.076626,
+    "seen": 1794442394.266528,
+    "ast_hash": "366ecc0c9bbbac8eca041b18b952e814",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/src/voxora/__main__.py": {
+    "mtime": 1793405810.7702332,
+    "seen": 1794442394.266528,
+    "ast_hash": "498bf0b7f1536759d37d1b45d05526ee",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/src/voxora/api.py": {
+    "mtime": 1794442333.4450684,
+    "seen": 1794442394.266528,
+    "ast_hash": "d620007f455dd312975d321e51d26a15",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/src/voxora/campaign.py": {
+    "mtime": 1793989503.7845485,
+    "seen": 1794442394.266529,
+    "ast_hash": "5b62ac9b9a8e4098258dcd86399f0a85",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/src/voxora/config.py": {
+    "mtime": 1794271221.842706,
+    "seen": 1794442394.266529,
+    "ast_hash": "65352b2deb4ff0b37dc37c3e89429b21",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/src/voxora/crm/__init__.py": {
+    "mtime": 1793326280.9288793,
+    "seen": 1794442394.266529,
+    "ast_hash": "fdf3070d62b005abbdacf99e3de22567",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/src/voxora/crm/base.py": {
+    "mtime": 1793326280.9308772,
+    "seen": 1794442394.26653,
+    "ast_hash": "9044a5b184afcbb68d74d53945d5f765",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/src/voxora/crm/http.py": {
+    "mtime": 1793326280.9326348,
+    "seen": 1794442394.26653,
+    "ast_hash": "bce6c8b80b83befc70292bb5cbb781b4",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/src/voxora/crm/squid.py": {
+    "mtime": 1793405821.6050565,
+    "seen": 1794442394.266531,
+    "ast_hash": "f38b0288ee795ec8c360ed22d0c39247",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/src/voxora/crm/sync.py": {
+    "mtime": 1793495094.2170165,
+    "seen": 1794442394.266531,
+    "ast_hash": "7e3b9df9f4795bb111d18eaaa0cf6a19",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/src/voxora/crm/webhooks.py": {
+    "mtime": 1793405711.62233,
+    "seen": 1794442394.266531,
+    "ast_hash": "306d3817f03e52a6fc7d6541a3ed1d7e",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/src/voxora/db.py": {
+    "mtime": 1794442298.4972036,
+    "seen": 1794442394.2665322,
+    "ast_hash": "e315cc1814402bde31cf7f7304a4d45c",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/src/voxora/eligibility.py": {
+    "mtime": 1793326263.656788,
+    "seen": 1794442394.2665322,
+    "ast_hash": "c9e8a017fee4d3d8268c30610afbc957",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/src/voxora/model_profiles.py": {
+    "mtime": 1794432938.1784124,
+    "seen": 1794442394.2665331,
+    "ast_hash": "00089117c1fdc1bd536e36d8fad8ce4e",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/src/voxora/models.py": {
+    "mtime": 1794433161.3817265,
+    "seen": 1794442394.2665331,
+    "ast_hash": "84a97102f52afe7e0d5eeffa414520cd",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/src/voxora/observability.py": {
+    "mtime": 1793770396.3801036,
+    "seen": 1794442394.2665331,
+    "ast_hash": "ecaa459a57cd400bbd5873c21befe584",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/src/voxora/pg.py": {
+    "mtime": 1794433573.2744792,
+    "seen": 1794442394.2665339,
+    "ast_hash": "6d6f21a65a2310ca6d6c7fcbc1d2358f",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/src/voxora/security.py": {
+    "mtime": 1793542955.3738246,
+    "seen": 1794442394.2665339,
+    "ast_hash": "428577f62a9cc1c7c4af2d8d340bd63c",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/src/voxora/seed.py": {
+    "mtime": 1793405721.0155878,
+    "seen": 1794442394.2665339,
+    "ast_hash": "2d199c0c4e672a25fee9e7e1db2805fe",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/src/voxora/state.py": {
+    "mtime": 1793405343.2756052,
+    "seen": 1794442394.2665348,
+    "ast_hash": "03379040c2e7b73936d0aa9ea0e4359c",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/src/voxora/telephony/__init__.py": {
+    "mtime": 1793405711.6216109,
+    "seen": 1794442394.2665348,
+    "ast_hash": "2add109c776170f05dced179bb2c38a2",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/src/voxora/telephony/base.py": {
+    "mtime": 1793542947.9393973,
+    "seen": 1794442394.266536,
+    "ast_hash": "7d23f863a07d642982b59072298ad329",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/src/voxora/telephony/mock.py": {
+    "mtime": 1793405810.7695658,
+    "seen": 1794442394.266536,
+    "ast_hash": "09f4bc3ea18b93ed674f9723b575b3d8",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/src/voxora/telephony/registry.py": {
+    "mtime": 1793543251.5446603,
+    "seen": 1794442394.266536,
+    "ast_hash": "eb96e976751768773b01a842f3a3fed7",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/src/voxora/telephony/scripted.py": {
+    "mtime": 1793405264.4769464,
+    "seen": 1794442394.266537,
+    "ast_hash": "bd091b48cbc98f1195e7fe7f7710b3f4",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/src/voxora/telephony/twilio.py": {
+    "mtime": 1793543347.4114997,
+    "seen": 1794442394.266537,
+    "ast_hash": "964e2218c0548602fc5420904bcf26da",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/src/voxora/telephony/voice_runtime.py": {
+    "mtime": 1793542413.6227071,
+    "seen": 1794442394.266537,
+    "ast_hash": "1bc869a9cd3f3180dc6a89efa60dd462",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/src/voxora/voice_analytics.py": {
+    "mtime": 1794433497.2505465,
+    "seen": 1794442394.266538,
+    "ast_hash": "10ea3ccb242dcd51d7be76aaef5ce86a",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/src/voxora/voice_providers.py": {
+    "mtime": 1794442023.5036826,
+    "seen": 1794442394.266538,
+    "ast_hash": "df2c81633bff0aa8b732ebebc32fddec",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/src/voxora/voice_session_budgets.py": {
+    "mtime": 1793989586.8472364,
+    "seen": 1794442394.266539,
+    "ast_hash": "b2fe5efbd3ab14185ea8c659cd664aa4",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/src/voxora/voice_session_checkpoints.py": {
+    "mtime": 1793989481.6959596,
+    "seen": 1794442394.266539,
+    "ast_hash": "31e0006de943b323e6c5e1fdf8e64266",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/src/voxora/voice_sessions.py": {
+    "mtime": 1794433516.0998821,
+    "seen": 1794442394.266539,
+    "ast_hash": "ab606e5a06c7c02124f67423c52ae586",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/src/voxora/voice_turn_detection.py": {
+    "mtime": 1794271210.8068125,
+    "seen": 1794442394.26654,
+    "ast_hash": "4b243347d4611384d1d328016649129b",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/src/voxora/voice_turn_loop.py": {
+    "mtime": 1794442612.134704,
+    "seen": 1794442725.264765,
+    "ast_hash": "b834dd588f26a2d547d1733bbf6100fe",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/src/voxora/worker.py": {
+    "mtime": 1793405711.622267,
+    "seen": 1794442394.26654,
+    "ast_hash": "c73b74ef0162244fddb75fb278ec4907",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/tests/__init__.py": {
+    "mtime": 1793405469.6258426,
+    "seen": 1794442394.266541,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/tests/conftest.py": {
+    "mtime": 1794433615.661732,
+    "seen": 1794442394.266541,
+    "ast_hash": "307132ac4ce40b0ae51026aeafba3d3e",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/tests/test_api.py": {
+    "mtime": 1794433034.1280599,
+    "seen": 1794442394.2665422,
+    "ast_hash": "a3e38bd84a935db53ff7ef58cff064bd",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/tests/test_audience_import.py": {
+    "mtime": 1793666718.3870387,
+    "seen": 1794442394.2665422,
+    "ast_hash": "1a2a1fae2a81ef325cf5cfcd7aeb838d",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/tests/test_campaign_engine.py": {
+    "mtime": 1793405749.8695223,
+    "seen": 1794442394.2665422,
+    "ast_hash": "bd18f6745a2c24844bc2d5f39c46705e",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/tests/test_crm_contract.py": {
+    "mtime": 1793495141.2479064,
+    "seen": 1794442394.2665431,
+    "ast_hash": "e64ae11e1783c528228fc29c771260b0",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/tests/test_eligibility.py": {
+    "mtime": 1793405711.6222503,
+    "seen": 1794442394.2665431,
+    "ast_hash": "ef0900c2e1347a4076d137115da925c8",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/tests/test_model_profiles.py": {
+    "mtime": 1794442298.4975312,
+    "seen": 1794442394.266544,
+    "ast_hash": "e15184434d076a830315b8e718c033c0",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/tests/test_observability.py": {
+    "mtime": 1793770414.9111977,
+    "seen": 1794442394.266544,
+    "ast_hash": "afa47bd2424427814c31a3e724adf115",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/tests/test_review_fixes.py": {
+    "mtime": 1794442298.4976768,
+    "seen": 1794442394.266544,
+    "ast_hash": "7f00d30ec4404ea60475c1edeb0e48a6",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/tests/test_secret_box.py": {
+    "mtime": 1793405236.5387363,
+    "seen": 1794442394.2665448,
+    "ast_hash": "2b07aeacfc65b107dcdce8ce7113be5a",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/tests/test_session_budgets.py": {
+    "mtime": 1793989586.8459864,
+    "seen": 1794442394.2665448,
+    "ast_hash": "d8dc7a15d5b03f1caaf0c07be415c1a9",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/tests/test_squid_adapter.py": {
+    "mtime": 1793405519.2164423,
+    "seen": 1794442394.2665448,
+    "ast_hash": "24f979b0e7365897fc7324e4f2239c08",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/tests/test_state_machine.py": {
+    "mtime": 1793405236.5368767,
+    "seen": 1794442394.266546,
+    "ast_hash": "d9e936fd8f9e08cdc96b28398b741c1f",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/tests/test_storage_compat.py": {
+    "mtime": 1793442799.3366983,
+    "seen": 1794442394.266546,
+    "ast_hash": "e677e9b72bb19269ca843a30d62ebf8e",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/tests/test_twilio_adapter.py": {
+    "mtime": 1793543347.4117534,
+    "seen": 1794442394.266546,
+    "ast_hash": "5940fef74a8921e36ff2936400256bef",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/tests/test_twilio_webhooks.py": {
+    "mtime": 1793772335.2991242,
+    "seen": 1794442394.266547,
+    "ast_hash": "ec47cdad8c3fd88804d874bcb1e4bed1",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/tests/test_voice_analytics.py": {
+    "mtime": 1794433644.2373247,
+    "seen": 1794442394.266547,
+    "ast_hash": "e7b32cc2aa2c3fd99ca2276be1b96605",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/tests/test_voice_providers.py": {
+    "mtime": 1794433397.9677503,
+    "seen": 1794442394.266548,
+    "ast_hash": "a944f6fda37ac5241e0582e6129addd7",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/tests/test_voice_runtime_seam.py": {
+    "mtime": 1793542392.7744193,
+    "seen": 1794442394.266548,
+    "ast_hash": "70d970d764491f24a782aabd2c6a175b",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/tests/test_voice_session_checkpoints.py": {
+    "mtime": 1793989481.6965115,
+    "seen": 1794442394.266549,
+    "ast_hash": "5d18c96cfa743a2a288aec907e7df215",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/tests/test_voice_sessions.py": {
+    "mtime": 1793772243.2683277,
+    "seen": 1794442394.266549,
+    "ast_hash": "0c111a49ef44f796f2af1bbcad990432",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/tests/test_voice_turn_detection.py": {
+    "mtime": 1794271655.2903397,
+    "seen": 1794442394.266549,
+    "ast_hash": "d5971e1cbfe34c71bcc53e4f7da924f1",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/tests/test_voice_turn_loop_http.py": {
+    "mtime": 1794442617.8301258,
+    "seen": 1794442725.2647748,
+    "ast_hash": "4d7c4bad8d08bcadfad5eda91c2e2b24",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/tests/test_webhook_replay.py": {
+    "mtime": 1793494968.1525335,
+    "seen": 1794442394.26655,
+    "ast_hash": "bdf72cad2246a80ccc0a876265a6d3da",
+    "semantic_hash": ""
+  },
+  "services/orchestrator/tests/test_worker_scheduling.py": {
+    "mtime": 1793442809.509364,
+    "seen": 1794442394.266551,
+    "ast_hash": "34bc5ae3ceefb1e2cb960c6543fba877",
+    "semantic_hash": ""
+  },
+  ".github/workflows/ci.yml": {
+    "mtime": 1793543141.1690338,
+    "seen": 1794442394.266551,
+    "ast_hash": "b05de150d20a0824c5e065a662bc1c06",
+    "semantic_hash": ""
+  },
+  "README.md": {
+    "mtime": 1794275837.8619413,
+    "seen": 1794442394.266551,
+    "ast_hash": "0b0168397a7346b21ef74b9ea1ac129d",
+    "semantic_hash": ""
+  },
+  "apps/console/index.html": {
+    "mtime": 1793408620.6746652,
+    "seen": 1794442394.266552,
+    "ast_hash": "45abbaf0b32cc3b624f474abfc5604c6",
+    "semantic_hash": ""
+  },
+  "crates/voice-runtime/README.md": {
+    "mtime": 1793408386.6439235,
+    "seen": 1794442394.266552,
+    "ast_hash": "b1535fe9d37f0b4a3a91d7f3af47788a",
+    "semantic_hash": ""
+  },
+  "docker-compose.yml": {
+    "mtime": 1793442524.6008923,
+    "seen": 1794442394.266552,
+    "ast_hash": "a0b37031644be7c74bcc84f2e0f10480",
+    "semantic_hash": ""
+  },
+  "docs/architecture.md": {
+    "mtime": 1793408826.4289386,
+    "seen": 1794442394.2665532,
+    "ast_hash": "bdaa628edf396cd85b5d3e7158d2df35",
+    "semantic_hash": ""
+  },
+  "docs/implementation-audit.md": {
+    "mtime": 1794433683.080785,
+    "seen": 1794442394.2665532,
+    "ast_hash": "f94dc92689fa0f4066aaabdb96918808",
+    "semantic_hash": ""
+  },
+  "docs/migration/capability-inventory.md": {
+    "mtime": 1793666306.9923227,
+    "seen": 1794442394.2665532,
+    "ast_hash": "dbbc9385e8b9fde58420de1bbfb970d8",
+    "semantic_hash": ""
+  },
+  "docs/migration/migration-adr.md": {
+    "mtime": 1793666338.2882428,
+    "seen": 1794442394.266554,
+    "ast_hash": "c55c182803104e39d6fffa6ea0ee4162",
+    "semantic_hash": ""
+  },
+  "docs/risks-and-assumptions.md": {
+    "mtime": 1793408907.343446,
+    "seen": 1794442394.266554,
+    "ast_hash": "63baaab9cf198557e94bfa16ff767e00",
+    "semantic_hash": ""
+  },
+  "docs/roadmap.md": {
+    "mtime": 1794433673.1242955,
+    "seen": 1794442394.266554,
+    "ast_hash": "f60372dafdfea96a185a47daa26464ac",
+    "semantic_hash": ""
+  },
+  "docs/superpowers/plans/2026-11-12-m7-m8-live-loop-routing-analytics.md": {
+    "mtime": 1794432845.2222006,
+    "seen": 1794442394.2665548,
+    "ast_hash": "07a25653f9c38e346026c46adf76afe0",
+    "semantic_hash": ""
+  },
+  "docs/voice-intelligence/dsp-engine-comparison.md": {
+    "mtime": 1794276951.3305523,
+    "seen": 1794442394.2665548,
+    "ast_hash": "04200209def86e66ff3be9b51401c90d",
+    "semantic_hash": ""
+  }
+}

@@ -22,7 +22,7 @@ Deliberately ordered so that every step ends in something runnable and testable.
 - [ ] Live Squid instance integration test (needs an actual server; blocked on environment).
 - [x] Consent + suppression sync for a CRM that exposes such objects — capability-driven enrichment in `crm/sync.py` with contract tests (memory capable-adapter + Squid stays honestly incapable).
 - [x] Webhook replay testing harness: duplicate idempotence, tampered-replay rejection, no-resurrect-on-replay, last-accepted-out-of-order semantics (`tests/test_webhook_replay.py`).
-- [ ] Second CRM adapter (candidate: whatever exposes consent + suppression) to prove adapter portability.
+- [x] Second CRM adapter — LeadConnector (GoHighLevel) with documented call-suppression read (`dndSettings.Call.status`, contract verified against marketplace.gohighlevel.com docs retrieved 2026-11-12, live-unverified), adapter-portability proven end-to-end through the sync engine (suppression applied per record, config-in-db `location_id`). Consent-read remains False honestly (no documented consent object); provider-supplied consent proven via the capability-driven contract tests.
 
 ## M3 — Real voice (the hard part)
 

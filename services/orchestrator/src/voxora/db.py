@@ -27,6 +27,7 @@ from .state import (
 
 JSON_COLUMNS = {
     "capabilities",
+    "config",
     "custom_fields",
     "metadata",
     "data",
@@ -323,6 +324,7 @@ CREATE TABLE IF NOT EXISTS crm_connections (
     webhook_secret_encrypted TEXT,
     status TEXT NOT NULL DEFAULT 'untested',
     capabilities TEXT NOT NULL DEFAULT '{}',
+    config TEXT NOT NULL DEFAULT '{}',
     last_tested_at TEXT,
     last_error TEXT,
     created_at TEXT NOT NULL,
@@ -464,6 +466,17 @@ class Database:
             connection.executescript(SCHEMA)
             self._migrate_campaigns(connection)
             self._migrate_voice_sessions(connection)
+            self._migrate_crm_connections(connection)
+
+    @staticmethod
+    def _migrate_crm_connections(connection: sqlite3.Connection) -> None:
+        """Idempotent column addition for databases created before provider config."""
+        existing = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(crm_connections)").fetchall()
+        }
+        if "config" not in existing:
+            connection.execute("ALTER TABLE crm_connections ADD COLUMN config TEXT NOT NULL DEFAULT '{}'")
 
     @staticmethod
     def _migrate_voice_sessions(connection: sqlite3.Connection) -> None:
@@ -1949,14 +1962,15 @@ class Database:
         api_key_encrypted: str,
         webhook_secret_encrypted: Optional[str],
         capabilities: Dict[str, Any],
+        config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         connection_id = new_id("crm")
         now = iso()
         with self._write() as connection:
             connection.execute(
                 "INSERT INTO crm_connections (id, tenant_id, provider, name, base_url,"
-                " api_key_encrypted, webhook_secret_encrypted, status, capabilities, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, 'untested', ?, ?, ?)",
+                " api_key_encrypted, webhook_secret_encrypted, status, capabilities, config, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, 'untested', ?, ?, ?, ?)",
                 (
                     connection_id,
                     tenant_id,
@@ -1966,6 +1980,7 @@ class Database:
                     api_key_encrypted,
                     webhook_secret_encrypted,
                     json.dumps(capabilities),
+                    json.dumps(config or {}),
                     now,
                     now,
                 ),
