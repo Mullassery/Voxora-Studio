@@ -1850,6 +1850,53 @@ class Database:
             }
         return summary
 
+    def metrics_snapshot(self) -> Dict[str, Any]:
+        """Cross-tenant aggregates for the Prometheus /metrics endpoint (M4c).
+
+        Read-only and tenant-agnostic: scrape-time aggregates over all
+        rows, not a tenant view. Latency quantiles are computed in Python
+        so SQLite and Postgres behave identically.
+        """
+        with self._read() as connection:
+            campaigns = connection.execute(
+                "SELECT status, COUNT(*) AS n FROM campaigns GROUP BY status"
+            ).fetchall()
+            calls = connection.execute(
+                "SELECT status, COUNT(*) AS n FROM calls GROUP BY status"
+            ).fetchall()
+            sessions = connection.execute(
+                "SELECT status, COUNT(*) AS n FROM voice_sessions GROUP BY status"
+            ).fetchall()
+            queue_depth = connection.execute(
+                "SELECT COUNT(*) AS n FROM campaign_recipients WHERE status='queued'"
+            ).fetchone()["n"]
+            active_calls = connection.execute(
+                "SELECT COUNT(*) AS n FROM calls"
+                " WHERE status IN ('queued','dialing','ringing','in_progress')"
+            ).fetchone()["n"]
+            latency_rows = connection.execute(
+                "SELECT stage, duration_ms FROM call_latency"
+            ).fetchall()
+        grouped: Dict[str, List[float]] = {}
+        for row in latency_rows:
+            grouped.setdefault(row["stage"], []).append(float(row["duration_ms"]))
+        latency: Dict[str, Dict[str, Any]] = {}
+        for stage, values in grouped.items():
+            values.sort()
+            latency[stage] = {
+                "count": len(values),
+                "p50": _percentile(values, 50),
+                "p95": _percentile(values, 95),
+            }
+        return {
+            "campaigns": {row["status"]: int(row["n"]) for row in campaigns},
+            "calls": {row["status"]: int(row["n"]) for row in calls},
+            "voice_sessions": {row["status"]: int(row["n"]) for row in sessions},
+            "queue_depth": int(queue_depth),
+            "active_calls": int(active_calls),
+            "latency": latency,
+        }
+
     def overview(self, tenant_id: str) -> Dict[str, Any]:
         with self._read() as connection:
             campaigns = connection.execute(

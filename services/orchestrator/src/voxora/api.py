@@ -402,6 +402,68 @@ def create_app(
             "time": now_iso(),
         }
 
+    @app.get(
+        "/metrics",
+        response_class=Response,
+        responses={200: {"content": {"text/plain; version=0.0.4; charset=utf-8": {}}}},
+    )
+    def prometheus_metrics(principal: TenantPrincipal = Depends(_principal_from_request)) -> Response:
+        """Prometheus text exposition (roadmap M4c).
+
+        Same bearer-token auth as every other route (scrapers send the
+        standard Authorization header); cross-tenant aggregates — no
+        per-caller scoping, metrics are an operator surface. Latency
+        quantiles come from the same call_latency rows the JSON logs
+        dashboards would use.
+        """
+        snapshot = app.state.db.metrics_snapshot()
+        lines: List[str] = []
+
+        def family(name: str, mtype: str, help_text: str) -> None:
+            lines.append(f"# HELP {name} {help_text}")
+            lines.append(f"# TYPE {name} {mtype}")
+
+        def sample(name: str, labels: str, value: Any) -> None:
+            lines.append(f"{name}{labels} {value}")
+
+        family("voxora_up", "gauge", "Whether the orchestrator answered a scrape.")
+        sample("voxora_up", "", 1)
+        family(
+            "voxora_campaigns_total",
+            "gauge",
+            "Campaigns by status (current rows, not a monotonic counter).",
+        )
+        for status, count in sorted(snapshot["campaigns"].items()):
+            sample("voxora_campaigns_total", f'{{status="{status}"}}', count)
+        family("voxora_calls_total", "gauge", "Calls by status (current rows, not a monotonic counter).")
+        for status, count in sorted(snapshot["calls"].items()):
+            sample("voxora_calls_total", f'{{status="{status}"}}', count)
+        family(
+            "voxora_voice_sessions_total",
+            "gauge",
+            "Voice sessions by status (current rows, not a monotonic counter).",
+        )
+        for status, count in sorted(snapshot["voice_sessions"].items()):
+            sample("voxora_voice_sessions_total", f'{{status="{status}"}}', count)
+        family("voxora_queue_depth", "gauge", "Campaign recipients waiting in the dial queue.")
+        sample("voxora_queue_depth", "", snapshot["queue_depth"])
+        family("voxora_active_calls", "gauge", "Calls currently queued or in progress.")
+        sample("voxora_active_calls", "", snapshot["active_calls"])
+        family(
+            "voxora_call_latency_ms",
+            "gauge",
+            "Per-stage call latency quantiles in milliseconds (summary-style).",
+        )
+        for stage, data in sorted(snapshot["latency"].items()):
+            for quantile, key in (("0.5", "p50"), ("0.95", "p95")):
+                if data.get(key) is not None:
+                    sample("voxora_call_latency_ms", f'{{stage="{stage}",quantile="{quantile}"}}', data[key])
+        lines.append("")
+        return Response(
+            content="\n".join(lines),
+            media_type="text/plain; version=0.0.4; charset=utf-8",
+        )
+
     @app.get("/api/v1/ready")
     def ready() -> Dict[str, Any]:
         db_ok = False
