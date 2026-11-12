@@ -117,3 +117,19 @@ class PostgresDatabase(Database):
                 ("recording_sid", "TEXT"),
             ):
                 connection.execute(f"ALTER TABLE voice_sessions ADD COLUMN IF NOT EXISTS {column} {definition}")  # noqa: S608 - fixed internal names
+
+    # multi-worker claiming (roadmap M4a) ---------------------------------
+    # Postgres runs READ COMMITTED with no writer serialization, so
+    # claiming needs explicit coordination: an advisory transaction lock
+    # serializes the slot accounting across worker processes, and
+    # FOR UPDATE SKIP LOCKED keeps concurrent workers from blocking on (or
+    # double-reading) rows another worker is claiming. The shared
+    # rowcount guard in Database.claim_recipients is the last line of
+    # defense for lost races.
+    _CLAIM_ADVISORY_KEY = 871503  # arbitrary app-specific lock id
+
+    def _claim_prelude(self, connection: Connection[Any]) -> None:  # type: ignore[override]
+        connection.execute("SELECT pg_advisory_xact_lock(%s)", (self._CLAIM_ADVISORY_KEY,))
+
+    def _claim_row_lock(self) -> str:  # type: ignore[override]
+        return " FOR UPDATE SKIP LOCKED"

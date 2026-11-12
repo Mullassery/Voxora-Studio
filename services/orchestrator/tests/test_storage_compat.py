@@ -11,6 +11,7 @@ set ``VOXORA_TEST_PG_URL`` (or rely on the local/CI default) to enable.
 from __future__ import annotations
 
 import json
+import threading
 from typing import List
 
 from voxora.db import Database
@@ -208,3 +209,62 @@ def test_overview_shape_is_backend_independent(database: Database) -> None:
     overview = database.overview("t1")
     expected_keys = {"campaigns", "calls", "queueDepth", "activeCalls", "recentErrors", "latency"}
     assert expected_keys == set(overview.keys())
+
+
+def test_concurrent_workers_claim_disjoint_recipients(database: Database) -> None:
+    """Two workers racing claim_recipients must never double-claim (roadmap M4a).
+
+    SQLite control: BEGIN IMMEDIATE + the rowcount guard. Postgres: the fix
+    is the rowcount guard + FOR UPDATE SKIP LOCKED (READ COMMITTED there has
+    no writer serialization, so this test reproduces the double-claim first).
+    """
+    database.ensure_tenant("t1", "Tenant")
+    agent = database.create_agent("t1", {"name": "Agent"})
+    contacts = [
+        database.create_local_contact(
+            "t1", {"first_name": f"W{i}", "last_name": "L", "phone": f"+1555123100{i}"}
+        )
+        for i in range(4)
+    ]
+    for contact in contacts:
+        database.update_contact_consent("t1", contact["id"], "granted", "operator")
+    campaign = database.create_campaign(
+        "t1",
+        {"name": "C", "agent_id": agent["id"], "dry_run": True,
+         "max_concurrency": 4, "max_attempts": 2, "retry_backoff_seconds": 30},
+    )
+    database.update_campaign_status("t1", campaign["id"], "running")
+    assert database.add_recipients("t1", campaign["id"], [c["id"] for c in contacts]) == 4
+
+    def _second_worker() -> Database:
+        # Fresh connection per "worker process" — a second Database instance
+        # over the same backend, like two real worker processes.
+        return type(database)(database.url) if type(database) is not Database else Database(database.path)
+
+    barrier = threading.Barrier(2)
+    results: List[List[dict]] = [[], []]
+    errors: List[Exception] = []
+
+    def _worker(index: int) -> None:
+        try:
+            worker_db = _second_worker()
+            barrier.wait(timeout=10)
+            results[index] = worker_db.claim_recipients(10)
+        except Exception as error:  # noqa: BLE001 - recorded for the assertion below
+            errors.append(error)
+
+    threads = [threading.Thread(target=_worker, args=(i,)) for i in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert errors == [], errors
+
+    all_claimed = results[0] + results[1]
+    assert len(all_claimed) == 4, f"expected every recipient claimed exactly once: {all_claimed}"
+    recipient_ids = [claimed["id"] for claimed in all_claimed]
+    assert len(set(recipient_ids)) == 4  # disjoint: no recipient claimed twice
+    counts = database.campaign_counts("t1", campaign["id"])
+    assert counts["recipients"] == 4
+    assert counts["active"] == 4  # dialing slots taken exactly once each
+    assert counts["queued"] == 0

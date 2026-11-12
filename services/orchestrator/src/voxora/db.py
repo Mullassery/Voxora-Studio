@@ -1302,9 +1302,11 @@ class Database:
         now = iso()
         claimed: List[Dict[str, Any]] = []
         with self._write() as connection:
+            self._claim_prelude(connection)
             campaigns = connection.execute(
                 "SELECT * FROM campaigns WHERE status='running'"
-                " AND (schedule_at IS NULL OR schedule_at <= ?) ORDER BY created_at ASC",
+                " AND (schedule_at IS NULL OR schedule_at <= ?) ORDER BY created_at ASC"
+                + self._claim_row_lock(),
                 (now,),
             ).fetchall()
             for campaign in campaigns:
@@ -1324,18 +1326,28 @@ class Database:
                     " FROM campaign_recipients r JOIN contacts c ON c.id=r.contact_id"
                     " WHERE r.campaign_id=? AND r.status='queued'"
                     " AND (r.next_attempt_at IS NULL OR r.next_attempt_at <= ?)"
-                    " ORDER BY r.created_at ASC LIMIT ?",
+                    " ORDER BY r.created_at ASC LIMIT ?"
+                    + self._claim_row_lock(),
                     (campaign["id"], now, slots),
                 ).fetchall()
                 for recipient in recipients:
                     attempt = int(recipient["attempts"]) + 1
                     idempotency_key = f"{campaign['id']}:{recipient['contact_id']}:{attempt}"
                     call_id = new_id("call")
-                    connection.execute(
+                    claim_update = connection.execute(
                         "UPDATE campaign_recipients SET status='dialing', attempts=?, updated_at=?"
                         " WHERE id=? AND status='queued'",
                         (attempt, now, recipient["id"]),
                     )
+                    # rowcount guard (roadmap M4a): another worker may have
+                    # claimed this recipient between our SELECT and UPDATE
+                    # (READ COMMITTED on Postgres has no writer
+                    # serialization; SQLite's BEGIN IMMEDIATE usually
+                    # serializes us, this is defense in depth there). A
+                    # 0-row update means we lost the race — skip without
+                    # touching calls/call_events.
+                    if getattr(claim_update, "rowcount", 1) != 1:
+                        continue
                     connection.execute(
                         "INSERT INTO calls (id, tenant_id, campaign_id, recipient_id, contact_id,"
                         " provider, status, direction, simulated, attempt, idempotency_key,"
@@ -1372,6 +1384,17 @@ class Database:
                     item["campaign"] = self._decode(campaign)
                     claimed.append(item)
         return claimed
+
+    # Multi-worker claiming hooks (roadmap M4a): SQLite serializes writers
+    # with BEGIN IMMEDIATE, so the defaults are no-ops; Postgres overrides
+    # both — an advisory transaction lock to serialize slot accounting and
+    # FOR UPDATE SKIP LOCKED so concurrent workers never block on rows
+    # another worker is claiming.
+    def _claim_prelude(self, connection: sqlite3.Connection) -> None:
+        return None
+
+    def _claim_row_lock(self) -> str:
+        return ""
 
     def get_recipient(self, tenant_id: str, recipient_id: str) -> Optional[Dict[str, Any]]:
         with self._read() as connection:
