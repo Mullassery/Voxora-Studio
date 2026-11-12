@@ -179,3 +179,72 @@
 - **Ruling: no ffmpeg.** Roadmap M8 says "ffmpeg-based"; ffmpeg is absent in this environment and not guaranteed in CI. The analyzer is stdlib-only (`wave`/`struct`) with identical semantics (pause = interior silence ≥ 400 ms). Cost if wrong: a future ffmpeg-based analyzer could detect pauses in compressed/lossy audio this one cannot — acceptable until real audio lands (M9).
 - **Ruling: routing table not consumed by the loop yet.** P7's deliverable here is the honest status surface + tests; the live loop's STT/TTS are deterministic simulated seams with no vendor to route to, and `effective_adapter` refuses unverified combos anyway. Consumption lands with the first real vendor adapter (M9).
 - **Ruling: live loop speaks over HTTP, not a socket.** The Rust socket transport (M6 `MediaTransport`) is future work; the turn loop mounts over HTTP (`POST /turns` with STT deltas) which is exactly the seam a socket backend will call. `mid_call_instructions` stays True for voice-runtime only, as the capability matrix already states.
+
+## Session addendum (post-plan execution)
+
+### Review fix pass (whole-branch review findings C1, I1–I6)
+
+Commit `8a368d2` — one pass, each fix RED→GREEN (tests in
+`services/orchestrator/tests/test_review_fixes.py` + ai-runtime round-trip
+asserts inside it):
+
+- **C1 + I3 (agent state durability):** agents gained
+  `export_state()`/`import_state()` (MockAgent script cursor; OpenRouterAgent
+  turn counter + history). `LiveTurnEngine` restores
+  `session_metadata.agent_state` on every new engine instance and persists it
+  after `start()`/`finish_stream()` — the conversation now actually advances
+  across `POST /turns` requests and usage totals accrue session-wide.
+- **I3 (usage honesty, follow-on of C1):** agents are per-request instances,
+  so `usage_report()` is per-instance cumulative. `_collect_agent_usage()`
+  now records the DELTA over the last-seen report (baseline updated per
+  collection) and accrues it onto the persisted totals — the opening line's
+  spend is no longer double-counted and per-turn `ai_usage` rows reflect the
+  turn actually spent. `test_model_profiles` fake made honest (spends per
+  call); row values unchanged.
+- **I1:** `mark_session_instruction_spoken` db method (status received→spoken)
+  called after the INSTRUCTION_SPOKEN event; drain filters non-received —
+  instructions survive engine rebuilds and are never re-spoken.
+- **I2:** `effective_adapter(language, modality)` now filters steps by the
+  requested modality; a stt quirk no longer satisfies a tts query.
+- **I5:** `recover_inflight()` force-fails in-flight calls AND terminates the
+  linked voice session (status failed + versioned `voice_session.failed`
+  event reason `worker_restart`) — session state follows the sole-writer.
+- **I6:** voice-runtime agent build moved BEFORE contact upsert / session /
+  call row creation (after the idempotency check) — an unconfigured LLM
+  501s without leaving zombie intake state; retry 501s again.
+- **I4:** `voice_turn_loop` module docstring corrected: checkpoint machinery
+  is prepared-not-mounted; state durability is `agent_state`, nothing more.
+
+Verification: full orchestrator suite 257 passed (SQLite + Postgres),
+ruff clean, mypy back to the 1 pre-existing import-untyped error (api.py
+narrowing asserts added for the moved build).
+
+### Integration test: PyInterviewBot consumes Voxora (DONE)
+
+Live run against a real Voxora server (`voice-runtime` telephony + mock LLM,
+port 8791, temp sqlite db) using the REAL `pyinterviewbot_ai.voxora_client`
+env (`VOXORA_BASE_URL`, `VOXORA_API_KEY`, `PYINTERVIEWBOT_LLM_PROVIDER=voxora`,
+`PYINTERVIEWBOT_VOXORA_MODEL_PROFILE=default` — PIB's default profile name
+`interview_default` is not seeded, which Voxora honestly 501s, contract
+verified both ways). 21/21 driver checks passed:
+
+- health; decide() decision-object contract; unknown-profile 501
+- create_voice_session → in_flight + event envelopes; opening line in transcript
+- instruction via client.session_instruction → spoken once at the boundary
+- raw POST /turns x2 → script advances, no re-spoken instruction, mock agent ends
+- transcript contains instruction + closing lines; session completed
+- terminate on a second fresh session
+
+Contract alignment fix committed (`740744f`): Voxora live-loop transcript
+entries now use `role: "agent"` (was `"assistant"`) to match the pinned
+PyInterviewBot contract test; analytics/budget logic is role-agnostic and
+checkpoints pipeline untouched. PyInterviewBot's own suite: 138 passed
+(venv recreated — stale after the repo moved to ~/Desktop).
+
+Known-not-exercised (honest): OpenRouter live LLM path in a voice session
+(no API key in env — MockAgent exercised; decide() over voxora LLM provider
+with a real key is PIB-side openai-compatible, unverified); HMAC webhook
+delivery to PIB (webhooks fire direct-transport; PIB verifies signatures
+only via its contract tests, not live); the `@health-probe` transcript
+health probe returns 404 → PIB provider reports unhealthy (PIB-side fix:
+probe `GET /api/v1/health` instead — recorded for PyInterviewBot).
