@@ -1031,6 +1031,15 @@ class Database:
             ).fetchall()
         return [self._decode(row) for row in rows]
 
+    def mark_session_instruction_spoken(self, tenant_id: str, session_id: str, instruction_id: str) -> None:
+        """Durably mark an instruction spoken so a fresh engine never re-drains it."""
+        with self._write() as connection:
+            connection.execute(
+                "UPDATE voice_session_instructions SET status='spoken'"
+                " WHERE tenant_id=? AND session_id=? AND instruction_id=? AND status='received'",
+                (tenant_id, session_id, instruction_id),
+            )
+
     def record_event_delivery(
         self,
         tenant_id: str,

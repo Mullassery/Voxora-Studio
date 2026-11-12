@@ -201,6 +201,18 @@ class OpenRouterAgent:
         self._turn = 0
         self._history = []
 
+    def export_state(self) -> Dict[str, Any]:
+        """Durable conversation state: turn counter + accumulated history."""
+        with self._lock:
+            return {"turn": self._turn, "history": list(self._history)}
+
+    def import_state(self, state: Dict[str, Any]) -> None:
+        """Restore conversation state persisted by `export_state`."""
+        with self._lock:
+            self._turn = int(state.get("turn") or 0)
+            self._history = [dict(item) for item in state.get("history") or []]
+            self._started = True
+
     def respond(self, user_text: str) -> AgentReply:
         if not self._started:
             raise AgentTurnError("call has not been started; call start() first")

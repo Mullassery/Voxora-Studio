@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Protocol, runtime_checkable
+from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
 _END_KEYWORDS = ("goodbye", "bye", "stop calling", "end call")
 _CLOSING = "Understood. Ending the simulated call now. Goodbye."
@@ -97,6 +97,15 @@ class MockAgent:
         """
         self._turn = 0
         self._started = True
+
+    def export_state(self) -> Dict[str, Any]:
+        """Durable agent cursor for session-durable conversation state."""
+        return {"script_index": self._turn, "started": self._started}
+
+    def import_state(self, state: Dict[str, Any]) -> None:
+        """Restore the cursor persisted by `export_state` (same conversation)."""
+        self._turn = int(state.get("script_index") or 0)
+        self._started = bool(state.get("started", True))
 
     def respond(self, user_text: str) -> AgentReply:
         if not self._started:

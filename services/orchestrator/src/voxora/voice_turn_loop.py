@@ -156,6 +156,7 @@ class LiveTurnEngine:
         settings: Optional[Any] = None,
         completed_turns: int = 0,
         resumed: bool = False,
+        agent_state: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.db = db
         self.tenant_id = tenant_id
@@ -163,20 +164,30 @@ class LiveTurnEngine:
         self.agent = agent
         self._settings = settings
         self._buffer: List[str] = []
-        # A resumed engine (fresh process, in-flight session) skips start():
-        # the opening line was already spoken by the request that created it.
-        # The agent seam is re-armed WITHOUT re-speaking that line (rearm()
-        # when available, else a discarded start() for scripted agents).
-        self._started = bool(resumed)
-        if resumed:
-            rearm = getattr(agent, "rearm", None)
-            if callable(rearm):
-                rearm()
-            else:
-                agent.start()
+        # Conversation state is session-durable, not engine-durable: a fresh
+        # engine (new request or new process) restores the persisted agent
+        # cursor (script position / LLM history) and cumulative usage so a
+        # multi-turn session actually progresses and budgets stay honest.
+        self._usage: Dict[str, float] = dict((agent_state or {}).get("usage") or {})
+        restored = bool(agent_state) and callable(getattr(agent, "import_state", None))
+        if restored:
+            agent.import_state(agent_state)  # type: ignore[attr-defined]
+            self._started = True
+        else:
+            # A resumed engine without persisted agent state skips start():
+            # the opening line was already spoken by the request that
+            # created it. The agent seam is re-armed WITHOUT re-speaking
+            # that line (rearm() when available, else a discarded start()
+            # for scripted agents).
+            self._started = bool(resumed)
+            if resumed:
+                rearm = getattr(agent, "rearm", None)
+                if callable(rearm):
+                    rearm()
+                else:
+                    agent.start()
         self._done = False
         self.completed_turns = completed_turns
-        self._usage: Dict[str, float] = {}
         self._spoken_instruction_ids: set = set()
 
     # ------------------------------------------------------------- STT side
@@ -229,11 +240,17 @@ class LiveTurnEngine:
                 INSTRUCTION_SPOKEN_EVENT,
                 {"instruction_id": instruction["instruction_id"], "type": instruction["type"]},
             )
+            # Durably mark spoken so a fresh engine (next request) never
+            # re-drains it — engine-local dedupe alone is per-instance.
+            self.db.mark_session_instruction_spoken(
+                self.tenant_id, self.session_id, instruction["instruction_id"]
+            )
         self.db.record_voice_session_event(
             self.tenant_id, self.session_id, TURN_COMPLETED_EVENT, self._turn_event_data(result, reply)
         )
         self.completed_turns += 1
         self._collect_agent_usage()
+        self._persist_agent_state()
         breached = self._budget_tick()
         if breached is not None:
             result.terminated = breached
@@ -264,6 +281,7 @@ class LiveTurnEngine:
         )
         self.completed_turns += 1
         self._collect_agent_usage()
+        self._persist_agent_state()
         breached = self._budget_tick()
         if breached is not None:
             result.terminated = breached
@@ -275,6 +293,20 @@ class LiveTurnEngine:
         return result
 
     # ------------------------------------------------------------ internals
+    def _persist_agent_state(self) -> None:
+        """Session-durable conversation cursor + cumulative usage (review C1/I3)."""
+        export = getattr(self.agent, "export_state", None)
+        if not callable(export):
+            return
+        try:
+            state = export()
+            if isinstance(state, dict):
+                state["usage"] = dict(self._usage)
+                self.db.update_voice_session_metadata(
+                    self.tenant_id, self.session_id, {"agent_state": state}
+                )
+        except Exception:  # noqa: BLE001 - a state-write failure must not kill the turn
+            logger.exception("agent state persistence failed for session %s", self.session_id)
     def _session(self) -> Dict[str, Any]:
         session = self.db.get_voice_session(self.tenant_id, self.session_id)
         if session is None:
@@ -301,8 +333,8 @@ class LiveTurnEngine:
         for instruction in self.db.list_session_instructions(self.tenant_id, self.session_id):
             if instruction["id"] in self._spoken_instruction_ids:
                 continue
-            if (instruction.get("status") or "received") == "superseded":
-                continue
+            if (instruction.get("status") or "received") != "received":
+                continue  # spoken or superseded — never re-spoken
             self._spoken_instruction_ids.add(instruction["id"])
             pending.append(instruction)
         return pending

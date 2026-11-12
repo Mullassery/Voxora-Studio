@@ -202,7 +202,7 @@ class LanguageRoutingTable:
         """
         report = self.attempt_report(language, modality)
         for step in report["steps"]:
-            if step["verified"]:
+            if step["modality"] == modality and step["verified"]:
                 return self._adapters[step["adapterId"]]
         return None
 
