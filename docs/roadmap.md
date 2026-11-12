@@ -29,15 +29,15 @@ Deliberately ordered so that every step ends in something runnable and testable.
 - [x] Wire `crates/voice-runtime` to the orchestrator: PyO3 extension `voxora_voice_runtime` (`make py-voice`) exposes the scripted bridge JSON; `VoiceRuntimeTelephonyAdapter` maps it onto `TelephonyResult` (simulation-only; seam tested with the real module). *Still open: real media transport in the bridge itself.*
 - [ ] Real media backend choice: SIP/RTP gateway via provider SDK, or platform WebSocket media (e.g. provider media streams). Decision gate: legal + carrier compliance review first.
 - [x] Twilio adapter implemented against the documented REST contract with fake-transport tests; async settlement wired through signed webhooks. *Still open: live-server verification (needs credentials).* `allow_live_calls` flips only with a real provider configured and an explicit operator env flag.
-- [ ] Streaming audio pipeline in the voice-runtime (jitter buffer, barge-in VAD) — the turn-taking machine is already written and tested for this.
+- [x] Streaming audio pipeline in the voice-runtime — the bounded jitter-tolerant chunk ring + per-hop latency tracking + barge-in gates shipped with the M6 media engine (f276a43); real-time integration tests ride the fake media WS.
 - [ ] Real STT/TTS integration contract in `ai-runtime` (replace `real_llm: False` with a pluggable LLM client; scripted agent stays as the test default).
 
 ## M4 — Production hygiene
 
 - [x] Run CI on GitHub (green on `ubuntu-24.04` pinned Python job; runs 41192274198, 41259238748).
-- [ ] Multi-worker safety: SQLite locks become Postgres advisory locks; campaign claims move to `SELECT … FOR UPDATE SKIP LOCKED`.
+- [x] Multi-worker safety: Postgres claims use an advisory transaction lock + `SELECT … FOR UPDATE SKIP LOCKED` (plus a shared rowcount guard), proven by a two-worker race test on both backends; SQLite keeps `BEGIN IMMEDIATE` serialization.
 - [ ] Rate limiting + quota per tenant; token rotation endpoint; operator audit export.
-- [ ] Observability: Prometheus metrics endpoint next to the JSON logs; call latency dashboards off the existing `call_latency` data.
+- [x] Observability: Prometheus `/metrics` text exposition (cross-tenant status counters, queue/active gauges, per-stage latency p50/p95 gauges from `call_latency`, bearer-token scrape auth). *Still open: console latency dashboards (the JSON log and metric surfaces exist).*
 
 ## M5 — Make the integration contracts real (P0) — COMPLETE 2026-11-04
 
