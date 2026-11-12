@@ -731,6 +731,20 @@ def create_app(
         )
         if existing is not None:
             return _voice_session_view(app, principal, existing)
+        live_agent = None
+        if app.state.settings.telephony_provider == "voice-runtime":
+            # Build the agent BEFORE any session/call rows exist: an
+            # unconfigured LLM must 501 without leaving zombie intake state
+            # (idempotent intake would otherwise return the stuck row).
+            from .voice_turn_loop import build_agent
+
+            try:
+                live_agent = build_agent(
+                    app.state.settings.llm_provider, agent_row.get("system_prompt", "")
+                )
+            except ValueError as error:
+                raise ApiError(501, str(error), "llm_provider_unconfigured") from None
+            assert live_agent is not None  # build_agent returns None only on 501 paths
         first_name, _, last_name = (payload.contact.name or "").partition(" ")
         contact = app.state.db.upsert_contact(
             tenant_id,
@@ -786,16 +800,11 @@ def create_app(
             # M7 live loop: the media backend owns the call; the session
             # opens with the agent's spoken line and STAYS in flight —
             # turns advance via POST /voice-sessions/{id}/turns.
-            from .voice_turn_loop import LiveTurnEngine, build_agent
+            from .voice_turn_loop import LiveTurnEngine
 
+            assert live_agent is not None  # build_agent ran above; 501 exits before any rows exist
             app.state.db.update_call(tenant_id, call["id"], target="dialing")
             app.state.db.update_call(tenant_id, call["id"], target="in_progress")
-            try:
-                live_agent = build_agent(
-                    app.state.settings.llm_provider, agent_row.get("system_prompt", "")
-                )
-            except ValueError as error:
-                raise ApiError(501, str(error), "llm_provider_unconfigured") from None
             engine = LiveTurnEngine(app.state.db, tenant_id, session["id"], live_agent, settings=app.state.settings)
             engine.start()
             session = app.state.db.update_voice_session(tenant_id, session["id"], status="in_flight")
@@ -1047,6 +1056,7 @@ def create_app(
             settings=app.state.settings,
             completed_turns=completed_turns,
             resumed=session["status"] == "in_flight",
+            agent_state=(session.get("session_metadata") or {}).get("agent_state"),
         )
         if session["status"] in {"created", "queued"}:
             engine.start()

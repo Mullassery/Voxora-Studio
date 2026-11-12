@@ -34,6 +34,18 @@ Honesty contract, matching the codebase's simulation-only pattern:
   `voice_session_budgets.enforce_session_budgets` — a breach orderly-
   terminates with `voice_session.terminated` reason `budget_exhausted`
   mid-loop.
+* Conversation state (agent script/LLM-history cursor and cumulative usage)
+  is SESSION-durable: `export_state()`/`import_state()` on the agent seam +
+  `session_metadata.agent_state` mean a fresh engine per request continues
+  the same conversation instead of restarting it (the media backend is the
+  process-durable owner; this module deliberately keeps no process-long
+  engine registry).
+
+NOT wired here (prepared, not mounted): the `CheckpointFlusher` checkpoint
+machinery from the M6 hardening work has no live-loop call sites yet —
+`POST /turns` advances are request-scoped and settle synchronously, so
+nothing flushes checkpoints in this slice. State durability is the
+`session_metadata.agent_state` write above, nothing more.
 """
 
 from __future__ import annotations
@@ -112,6 +124,17 @@ def _reply_agent_latency(reply: Any, default: float) -> float:
     return default
 
 
+def _merge_usage(current: Dict[str, Any], delta: Dict[str, Any]) -> Dict[str, Any]:
+    """Additive merge: same-key usage fields accrue, they do not overwrite."""
+    merged: Dict[str, Any] = dict(current)
+    for key, value in delta.items():
+        try:
+            merged[key] = round(float(merged.get(key, 0.0)) + float(value), 6)
+        except (TypeError, ValueError):
+            merged[key] = value
+    return merged
+
+
 def build_agent(llm_provider: str = "mock", system_prompt: str = "") -> TurnAgent:
     """Build the session agent over the voxora_ai seam (no network by default).
 
@@ -169,6 +192,17 @@ class LiveTurnEngine:
         # cursor (script position / LLM history) and cumulative usage so a
         # multi-turn session actually progresses and budgets stay honest.
         self._usage: Dict[str, float] = dict((agent_state or {}).get("usage") or {})
+        # Agents are rebuilt per request; usage_report() is cumulative for
+        # the agent *instance*, so the session-cumulative number is
+        # persisted-usage + (report - report-at-engine-start).
+        self._usage_baseline: Dict[str, float] = {}
+        baseline = getattr(agent, "usage_report", None)
+        if callable(baseline):
+            initial = baseline()
+            if isinstance(initial, dict):
+                self._usage_baseline = {
+                    str(key): float(value or 0.0) for key, value in initial.items()
+                }
         restored = bool(agent_state) and callable(getattr(agent, "import_state", None))
         if restored:
             agent.import_state(agent_state)  # type: ignore[attr-defined]
@@ -363,13 +397,29 @@ class LiveTurnEngine:
         )
 
     def _collect_agent_usage(self) -> None:
-        """Real per-turn usage capture (M6 wanted this from M7's loop)."""
+        """Real per-turn usage capture (M6 wanted this from M7's loop).
+
+        The agent instance is per-request, so its report is that request's
+        cumulative usage; the delta over the engine-start baseline is what
+        this turn consumed, and it accrues onto the session-cumulative
+        totals persisted in agent_state.usage.
+        """
         usage = getattr(self.agent, "usage_report", None)
         if callable(usage):
             report = usage()
             if isinstance(report, dict):
-                self._usage = {**self._usage, **report}
-                self._record_usage_row(report)
+                delta = {
+                    str(key): float(value or 0.0) - self._usage_baseline.get(str(key), 0.0)
+                    for key, value in report.items()
+                }
+                delta = {key: round(value, 6) for key, value in delta.items() if value != 0.0}
+                self._usage = {**self._usage, **_merge_usage(self._usage, delta)}
+                self._record_usage_row(delta)
+                # The baseline becomes the last-seen report so the next
+                # collection only counts what the agent spent SINCE then.
+                self._usage_baseline = {
+                    str(key): float(value or 0.0) for key, value in report.items()
+                }
 
     def _record_usage_row(self, report: Dict[str, Any]) -> None:
         """Persist one ai_usage row per turn task (P8 token economics).

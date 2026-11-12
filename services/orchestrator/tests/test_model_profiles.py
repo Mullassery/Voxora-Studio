@@ -223,14 +223,19 @@ def test_engine_records_turn_usage_rows(database: Database) -> None:
     class FakeAgent:
         provider = "openrouter"
 
+        def __init__(self) -> None:
+            self._spent = 0.0
+
         def start(self) -> object:
+            self._spent += 12.0
             return SimpleNamespace(text="hello", ended=False)
 
         def respond(self, user_text: str) -> object:
+            self._spent += 12.0
             return SimpleNamespace(text="ok", ended=True)
 
         def usage_report(self) -> dict:
-            return {"total_tokens": 12.0, "cost_usd": 0.0003}
+            return {"total_tokens": self._spent, "cost_usd": 0.0003 * self._spent / 12.0}
 
     engine = LiveTurnEngine(database, "tenant-a", session["id"], FakeAgent())  # type: ignore[arg-type]
     engine.start()

@@ -9,7 +9,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from voxora.db import Database
-from voxora.voice_providers import LanguageRoutingTable, ProviderAdapter, VerifiedQuirk, VerifiedQuirks
+from voxora.voice_providers import (
+    LanguageRoutingTable,
+    ProviderAdapter,
+    VerifiedQuirk,
+    VerifiedQuirks,
+)
 
 AUTH = {"Authorization": "Bearer admin-token"}
 
@@ -92,13 +97,11 @@ def test_agent_export_import_state_round_trip() -> None:
 def test_openrouter_agent_state_carries_history() -> None:
     pytest.importorskip("voxora_ai")
     import httpx
-
     from voxora_ai.openrouter import OpenRouterAgent
 
     captured: Dict[str, Any] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        captured["messages"] = httpx._content.decode(request.read())  # type: ignore[attr-defined]
         import json as _json
 
         body = _json.loads(request.read())
@@ -155,16 +158,19 @@ def test_engine_usage_persists_across_engines(database: Database) -> None:
 
         def __init__(self) -> None:
             self._started = False
+            self._spent = 0.0
 
         def start(self) -> object:
             self._started = True
+            self._spent = 12.0
             return SimpleNamespace(text="hello", ended=False)
 
         def respond(self, user_text: str) -> object:
+            self._spent += 12.0
             return SimpleNamespace(text="ok", ended=False)
 
         def usage_report(self) -> dict:
-            return {"total_tokens": 12.0}
+            return {"total_tokens": self._spent}
 
         def export_state(self) -> dict:
             return {"started": True}
@@ -176,17 +182,20 @@ def test_engine_usage_persists_across_engines(database: Database) -> None:
     engine1 = LiveTurnEngine(database, "tenant-a", session["id"], first_agent)  # type: ignore[arg-type]
     engine1.start()
     engine1.finish_stream()
+    # two LLM calls (opening line + turn) x 12 tokens each
     persisted = database.get_voice_session("tenant-a", session["id"])["session_metadata"]["agent_state"]
-    assert persisted["usage"]["total_tokens"] == 12.0
+    assert persisted["usage"]["total_tokens"] == 24.0
 
     engine2 = LiveTurnEngine(
         database, "tenant-a", session["id"], FakeAgent(),  # type: ignore[arg-type]
         resumed=True, agent_state=persisted,
     )
-    assert engine2._usage_extra()["total_tokens"] == 12.0
+    assert engine2._usage_extra()["total_tokens"] == 24.0
+    engine2.respond = None  # type: ignore[assignment]  # turns go through the stream API
+    engine2.ingest_delta("again")
     engine2.finish_stream()
     persisted2 = database.get_voice_session("tenant-a", session["id"])["session_metadata"]["agent_state"]
-    assert persisted2["usage"]["total_tokens"] == 24.0  # cumulative, not reset
+    assert persisted2["usage"]["total_tokens"] == 36.0  # cumulative, not reset
 
 
 # ------------------------------------------------------------------- I1
@@ -204,7 +213,8 @@ def test_instruction_spoken_once_across_requests(voice_runtime_client: TestClien
     assert first["spoken_segments"][0] == "SAY THIS ONCE"
     second = _turn(voice_runtime_client, body["session_id"], ["more"])["turn"]
     assert second["instruction_ids"] == []  # NOT re-spoken
-    assert second["spoken_segments"] == [_MOCK_SCRIPT[1]]
+    assert second["spoken_segments"] == [_MOCK_SCRIPT[2]]  # script advanced
+    assert second["ended"] is True
 
 
 # ------------------------------------------------------------------- I2

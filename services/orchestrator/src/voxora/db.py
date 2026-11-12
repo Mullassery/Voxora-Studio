@@ -1496,9 +1496,44 @@ class Database:
                         )
                     else:
                         connection.execute(
-                            "UPDATE campaign_recipients SET status='failed', last_error=?, updated_at=?"
-                            " WHERE id=?",
+                            "UPDATE campaign_recipients SET status='failed', last_error=?, updated_at=?",
                             ("Recovered after worker restart", now, recipient["id"]),
+                        )
+                # Voice-session calls: the session row must follow the call
+                # — an in-flight live session whose call is force-failed at
+                # restart terminates with a versioned event (sole-writer
+                # consistency), it never stays in_flight on a dead call.
+                voice_session = connection.execute(
+                    "SELECT id, status FROM voice_sessions WHERE tenant_id=? AND call_id=?",
+                    (call["tenant_id"], call["id"]),
+                ).fetchone()
+                if voice_session is not None:
+                    session_status = (
+                        voice_session["status"]
+                        if isinstance(voice_session, dict)
+                        else voice_session[1]
+                    )
+                    if session_status not in ("completed", "failed", "terminated", "busy", "no_answer"):
+                        session_id = (
+                            voice_session["id"]
+                            if isinstance(voice_session, dict)
+                            else voice_session[0]
+                        )
+                        connection.execute(
+                            "UPDATE voice_sessions SET status='failed', updated_at=? WHERE id=?",
+                            (now, session_id),
+                        )
+                        connection.execute(
+                            "INSERT INTO voice_session_events (id, tenant_id, session_id,"
+                            " event_type, event_version, occurred_at, data)"
+                            " VALUES (?, ?, ?, 'voice_session.failed', '1.0', ?, ?)",
+                            (
+                                new_id("vxe"),
+                                call["tenant_id"],
+                                session_id,
+                                now,
+                                json.dumps({"reason": "worker_restart"}),
+                            ),
                         )
                 recovered += 1
             # A recipient can be marked dialing without a call row if the process
