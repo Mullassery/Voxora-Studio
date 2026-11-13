@@ -36,6 +36,7 @@ JSON_COLUMNS = {
     "latency",
     "session_metadata",
     "transcript",
+    "voice_boost",
 }
 
 MODEL_PROFILE_TASKS = ("turn", "analyze")
@@ -264,6 +265,7 @@ CREATE TABLE IF NOT EXISTS voice_sessions (
     simulated INTEGER NOT NULL DEFAULT 1,
     recording_url TEXT,
     recording_sid TEXT,
+    voice_boost TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE(tenant_id, external_application, external_session_id)
@@ -398,6 +400,14 @@ CREATE TABLE IF NOT EXISTS model_profiles (
 );
 CREATE INDEX IF NOT EXISTS idx_model_profiles_tenant ON model_profiles(tenant_id, profile);
 
+CREATE TABLE IF NOT EXISTS voice_boost_settings (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL UNIQUE,
+    profile TEXT NOT NULL,
+    config TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS ai_usage (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
@@ -488,6 +498,10 @@ class Database:
         for column in ("recording_url", "recording_sid"):
             if column not in existing:
                 connection.execute(f"ALTER TABLE voice_sessions ADD COLUMN {column} TEXT")
+        if "voice_boost" not in existing:
+            connection.execute(
+                "ALTER TABLE voice_sessions ADD COLUMN voice_boost TEXT NOT NULL DEFAULT '{}'"
+            )
 
     @staticmethod
     def _migrate_campaigns(connection: sqlite3.Connection) -> None:
@@ -575,6 +589,52 @@ class Database:
                 (tenant_id, profile, task),
             ).fetchone()
         return self._decode(row) if row else None
+
+    # --------------------------------------------------- voice boost settings
+    def seed_voice_boost_settings(self, tenant_id: str, profile: str, config: Dict[str, Any]) -> None:
+        """Idempotent config-in-db seed of the tenant's global Boost row."""
+        now = iso()
+        with self._write() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO voice_boost_settings"
+                " (id, tenant_id, profile, config, updated_at)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (new_id("vbs"), tenant_id, profile, json.dumps(config), now),
+            )
+
+    def get_voice_boost_settings(self, tenant_id: str) -> Optional[Dict[str, Any]]:
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT profile, config, updated_at FROM voice_boost_settings"
+                " WHERE tenant_id=?",
+                (tenant_id,),
+            ).fetchone()
+        return self._decode(row) if row else None
+
+    def put_voice_boost_settings(
+        self, tenant_id: str, profile: str, config: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        with self._write() as connection:
+            connection.execute(
+                "INSERT INTO voice_boost_settings"
+                " (id, tenant_id, profile, config, updated_at)"
+                " VALUES (?, ?, ?, ?, ?)"
+                " ON CONFLICT(tenant_id) DO UPDATE SET"
+                " profile=?, config=?, updated_at=?",
+                (
+                    new_id("vbs"),
+                    tenant_id,
+                    profile,
+                    json.dumps(config),
+                    iso(),
+                    profile,
+                    json.dumps(config),
+                    iso(),
+                ),
+            )
+        stored = self.get_voice_boost_settings(tenant_id)
+        assert stored is not None
+        return stored
 
     # --------------------------------------------------------------- ai usage
     def record_ai_usage(
@@ -857,8 +917,8 @@ class Database:
                 "INSERT INTO voice_sessions (id, tenant_id, external_application,"
                 " external_session_id, agent_id, model_profile, contact_id, call_id, status,"
                 " webhook_url, session_metadata, transcript, provider, simulated,"
-                " created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                " voice_boost, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                 " ON CONFLICT(tenant_id, external_application, external_session_id) DO NOTHING",
                 (
                     values.get("id") or new_id("vxs"),
@@ -875,6 +935,7 @@ class Database:
                     json.dumps(values.get("transcript", [])),
                     values.get("provider", "mock"),
                     int(bool(values.get("simulated", True))),
+                    json.dumps(values.get("voice_boost", {})),
                     now,
                     now,
                 ),

@@ -38,6 +38,7 @@ _PG_TABLES = [
     "voice_session_events",
     "voice_session_instructions",
     "voice_sessions",
+    "voice_boost_settings",
     "webhook_events",
 ]
 

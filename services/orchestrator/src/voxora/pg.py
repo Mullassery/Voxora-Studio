@@ -115,6 +115,7 @@ class PostgresDatabase(Database):
             for column, definition in (
                 ("recording_url", "TEXT"),
                 ("recording_sid", "TEXT"),
+                ("voice_boost", "TEXT NOT NULL DEFAULT '{}'"),
             ):
                 connection.execute(f"ALTER TABLE voice_sessions ADD COLUMN IF NOT EXISTS {column} {definition}")  # noqa: S608 - fixed internal names
             # Provider-specific connection config (e.g. LeadConnector's
