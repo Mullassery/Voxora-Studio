@@ -118,6 +118,9 @@ class PostgresDatabase(Database):
                 ("voice_boost", "TEXT NOT NULL DEFAULT '{}'"),
             ):
                 connection.execute(f"ALTER TABLE voice_sessions ADD COLUMN IF NOT EXISTS {column} {definition}")  # noqa: S608 - fixed internal names
+            # Voice Boost master switch (parity with the SQLite
+            # `_migrate_voice_boost_settings` hook).
+            connection.execute("ALTER TABLE voice_boost_settings ADD COLUMN IF NOT EXISTS enabled INTEGER NOT NULL DEFAULT 1")
             # Provider-specific connection config (e.g. LeadConnector's
             # location_id) — parity with the SQLite `_migrate_crm_connections`.
             connection.execute("ALTER TABLE crm_connections ADD COLUMN IF NOT EXISTS config TEXT NOT NULL DEFAULT '{}'")

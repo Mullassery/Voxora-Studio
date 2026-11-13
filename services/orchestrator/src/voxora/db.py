@@ -404,6 +404,7 @@ CREATE TABLE IF NOT EXISTS voice_boost_settings (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL UNIQUE,
     profile TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
     config TEXT NOT NULL DEFAULT '{}',
     updated_at TEXT NOT NULL
 );
@@ -476,6 +477,7 @@ class Database:
             connection.executescript(SCHEMA)
             self._migrate_campaigns(connection)
             self._migrate_voice_sessions(connection)
+            self._migrate_voice_boost_settings(connection)
             self._migrate_crm_connections(connection)
 
     @staticmethod
@@ -501,6 +503,18 @@ class Database:
         if "voice_boost" not in existing:
             connection.execute(
                 "ALTER TABLE voice_sessions ADD COLUMN voice_boost TEXT NOT NULL DEFAULT '{}'"
+            )
+
+    @staticmethod
+    def _migrate_voice_boost_settings(connection: sqlite3.Connection) -> None:
+        """Idempotent column additions for databases created before the master switch."""
+        existing = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(voice_boost_settings)").fetchall()
+        }
+        if existing and "enabled" not in existing:
+            connection.execute(
+                "ALTER TABLE voice_boost_settings ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1"
             )
 
     @staticmethod
@@ -591,45 +605,53 @@ class Database:
         return self._decode(row) if row else None
 
     # --------------------------------------------------- voice boost settings
-    def seed_voice_boost_settings(self, tenant_id: str, profile: str, config: Dict[str, Any]) -> None:
+    def seed_voice_boost_settings(
+        self, tenant_id: str, profile: str, config: Dict[str, Any], enabled: bool = True
+    ) -> None:
         """Idempotent config-in-db seed of the tenant's global Boost row."""
         now = iso()
         with self._write() as connection:
             connection.execute(
                 "INSERT OR IGNORE INTO voice_boost_settings"
-                " (id, tenant_id, profile, config, updated_at)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (new_id("vbs"), tenant_id, profile, json.dumps(config), now),
+                " (id, tenant_id, profile, enabled, config, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (new_id("vbs"), tenant_id, profile, int(enabled), json.dumps(config), now),
             )
 
     def get_voice_boost_settings(self, tenant_id: str) -> Optional[Dict[str, Any]]:
         with self._read() as connection:
             row = connection.execute(
-                "SELECT profile, config, updated_at FROM voice_boost_settings"
+                "SELECT profile, enabled, config, updated_at FROM voice_boost_settings"
                 " WHERE tenant_id=?",
                 (tenant_id,),
             ).fetchone()
-        return self._decode(row) if row else None
+        decoded = self._decode(row) if row else None
+        if decoded is not None:
+            decoded["enabled"] = bool(decoded.get("enabled", 1))
+        return decoded
 
     def put_voice_boost_settings(
-        self, tenant_id: str, profile: str, config: Dict[str, Any]
+        self, tenant_id: str, profile: str, config: Dict[str, Any], enabled: bool = True
     ) -> Dict[str, Any]:
+        now = iso()
         with self._write() as connection:
             connection.execute(
                 "INSERT INTO voice_boost_settings"
-                " (id, tenant_id, profile, config, updated_at)"
-                " VALUES (?, ?, ?, ?, ?)"
+                " (id, tenant_id, profile, enabled, config, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)"
                 " ON CONFLICT(tenant_id) DO UPDATE SET"
-                " profile=?, config=?, updated_at=?",
+                " profile=?, enabled=?, config=?, updated_at=?",
                 (
                     new_id("vbs"),
                     tenant_id,
                     profile,
+                    int(enabled),
                     json.dumps(config),
-                    iso(),
+                    now,
                     profile,
+                    int(enabled),
                     json.dumps(config),
-                    iso(),
+                    now,
                 ),
             )
         stored = self.get_voice_boost_settings(tenant_id)

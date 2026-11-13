@@ -9,6 +9,9 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+import pytest
+from pydantic import ValidationError
+
 from voxora.db import Database
 
 TENANT = "t-boost"
@@ -56,3 +59,54 @@ def test_session_voice_boost_column_persists_and_decodes(database: Database) -> 
     )
     stored = database.get_voice_session(TENANT, created["id"])
     assert stored["voice_boost"] == {"profile": "natural", "overrides": {"eq": False}}
+
+
+# --------------------------------------------------- resolution (voice_boost.py)
+
+
+def test_builtin_defaults_are_clear_enabled() -> None:
+    from voxora.voice_boost import builtin_voice_boost_settings
+
+    assert builtin_voice_boost_settings() == {
+        "profile": "clear",
+        "overrides": {},
+        "enabled": True,
+    }
+
+
+def test_resolution_seeds_once_and_merges_override(database: Database) -> None:
+    from voxora.voice_boost import resolve_voice_boost_settings
+
+    database.ensure_tenant(TENANT, "Tenant")
+    first = resolve_voice_boost_settings(
+        database, TENANT, {"overrides": {"eq": False}}
+    )
+    assert first["profile"] == "clear" and first["enabled"] is True
+    assert first["overrides"] == {"eq": False}
+    # Session overrides never persist into global defaults: a second session
+    # with a different profile inherits only the stored global defaults.
+    second = resolve_voice_boost_settings(database, TENANT, {"profile": "natural"})
+    assert second["profile"] == "natural"
+    assert second["overrides"] == {}
+
+
+def test_resolution_disabled_bypasses_overrides(database: Database) -> None:
+    from voxora.voice_boost import resolve_voice_boost_settings
+
+    database.ensure_tenant(TENANT, "Tenant")
+    resolved = resolve_voice_boost_settings(
+        database, TENANT, {"enabled": False, "overrides": {"ns_strength": 0.5}}
+    )
+    assert resolved["enabled"] is False
+    assert resolved["overrides"] == {"ns_strength": 0.5}
+
+
+def test_override_rejects_unknown_key_and_bad_ranges() -> None:
+    from voxora.models import VoiceBoostControlOverrides
+
+    with pytest.raises(ValidationError):
+        VoiceBoostControlOverrides.model_validate({"reverb": True})
+    with pytest.raises(ValidationError):
+        VoiceBoostControlOverrides.model_validate({"ns_strength": 1.5})
+    with pytest.raises(ValidationError):
+        VoiceBoostControlOverrides.model_validate({"agc_target_dbfs": -3.0})

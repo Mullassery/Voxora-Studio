@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -87,6 +87,47 @@ class VoiceSessionAgent(BaseModel):
     model_profile: Optional[str] = Field(default=None, max_length=120)
 
 
+class VoiceBoostControlOverrides(BaseModel):
+    """Independent Voice Boost DSP control overrides (roadmap M9).
+
+    Exactly the 11 control keys the Rust engine accepts
+    (`crates/voice-runtime/src/dsp.rs::config_from_settings_json`); unknown
+    keys are refused and numeric ranges are REJECTED, never clamped — the
+    API boundary does not silently reinterpret operator intent.
+    """
+
+    model_config = {"extra": "forbid"}
+    noise_suppression: Optional[bool] = None
+    ns_strength: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    agc: Optional[bool] = None
+    agc_target_dbfs: Optional[float] = Field(default=None, ge=-60.0, le=-6.0)
+    agc_max_boost_db: Optional[float] = Field(default=None, gt=0.0, le=48.0)
+    agc_max_cut_db: Optional[float] = Field(default=None, gt=0.0, le=48.0)
+    normalize: Optional[bool] = None
+    eq: Optional[bool] = None
+    de_ess: Optional[bool] = None
+    de_ess_strength: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    clipping_watch: Optional[bool] = None
+
+    def resolved(self) -> Dict[str, Any]:
+        """The set overrides only (None fields dropped)."""
+        return self.model_dump(exclude_none=True)
+
+
+class VoiceBoostSettingsUpdate(BaseModel):
+    """Voice Boost settings envelope: master switch + profile + controls.
+
+    `enabled: false` is the master off-switch — it maps to the Rust engine's
+    bypass (original audio preserved byte-identically) while overrides stay
+    resolved so re-enabling is lossless.
+    """
+
+    model_config = {"extra": "forbid"}
+    enabled: bool = True
+    profile: Literal["natural", "clear", "studio"] = "clear"
+    overrides: VoiceBoostControlOverrides = Field(default_factory=VoiceBoostControlOverrides)
+
+
 class VoiceSessionCreate(BaseModel):
     """Voice-session intake per the ecosystem ADR (ADR-3B).
 
@@ -102,6 +143,7 @@ class VoiceSessionCreate(BaseModel):
     agent: VoiceSessionAgent
     session_metadata: Dict[str, Any] = Field(default_factory=dict)
     webhook_url: Optional[str] = Field(default=None, max_length=2000)
+    voice_boost: Optional[VoiceBoostSettingsUpdate] = None
 
 
 class SttDeltas(BaseModel):

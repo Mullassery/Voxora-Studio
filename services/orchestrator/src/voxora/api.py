@@ -204,6 +204,9 @@ def _voice_session_view(
     db: Database = app.state.db
     call = db.get_call(principal.tenant_id, session["call_id"]) if session["call_id"] else None
     events = db.list_voice_session_events(principal.tenant_id, session["id"])
+    from .voice_boost import resolve_voice_boost_settings
+
+    resolved_boost = resolve_voice_boost_settings(db, principal.tenant_id, session.get("voice_boost") or None)
     return {
         "session_id": session["id"],
         "external_application": session["external_application"],
@@ -214,6 +217,7 @@ def _voice_session_view(
         "provider": session["provider"],
         "simulated": bool(session["simulated"]),
         "transcript_available": bool(session["transcript"] or []),
+        "voice_boost": resolved_boost,
         "call_id": session["call_id"],
         "call_status": call["status"] if call else None,
         "events": [
@@ -839,6 +843,11 @@ def create_app(
                 "provider": app.state.settings.telephony_provider,
                 "simulated": app.state.settings.telephony_provider != "twilio"
                 or not app.state.settings.allow_live_calls,
+                "voice_boost": (
+                    payload.voice_boost.model_dump(exclude_unset=True)
+                    if payload.voice_boost is not None
+                    else {}
+                ),
             },
         )
         app.state.db.record_voice_session_event(
