@@ -174,13 +174,32 @@ live call (TwiML `<Say>` from the static prompt only).
 - [ ] **Candidate-consent voice cloning / identity checks stay out of scope**
   unless record consents explicitly classify allowed models.
 
-## M9 — Voice Intelligence Suite (in progress, branch `feature/voice-intelligence`)
+## M9 + M10 — one mission: the complete voice pipeline
+
+M9 and M10 are two halves of a single capability, not two features. M10 is how
+Voxora PRODUCES speech (script → multilingual audio assets). M9 is how Voxora
+HEARS and UNDERSTANDS speech (enhance live inbound audio, transcribe it
+multilingually, measure it). M5–M8 already cover how Voxora DELIVERS it (the
+live turn loop over real telephony) and PROVES it (production contracts,
+integrity signals). Together they close the loop the platform exists for:
+consented outbound calling where the platform speaks the audience's language,
+hears them clearly, understands them, and can show what was said — with every
+stage consuming exactly what the previous stage honestly produces. The
+pipeline discipline (capability honesty, measured claims, contract boundaries)
+applies to the whole, because a claim in one stage is only as good as the
+stage that consumes it.
+
+## M9 — Voice Intelligence Suite (the HEAR and UNDERSTAND half)
 
 Integrated voice intelligence: audio enhancement + open-source multilingual
-transcription + observability, per the discovery-first master spec. Discovery
+transcription + observability, per the discovery-first master spec (work in
+progress on branch `feature/voice-intelligence`). Discovery
 report (existing-state architecture audit) is complete; every item below keeps
 the capability-honesty contract — no neural/integrated claim without a working
-implementation and measurements.
+implementation and measurements. Pipeline role: everything produced here
+(cleaned audio, transcripts, language detection, integrity estimates) is what
+the M5–M8 delivery path consumes live and what M8 reports surface — these are
+not side features but the platform's ears.
 
 - [ ] **DSP engine evaluation + selection.** Evaluate WebRTC APM, RNNoise,
   DeepFilterNet, SpeexDSP against licensing, Rust integration, CPU/memory,
@@ -193,9 +212,14 @@ implementation and measurements.
   `FormatRegistry::convert` and `ChannelRing::push` on the inbound path
   (media.rs) — ahead of `frame_rms`/VAD/barge-in gates; thresholds
   re-validated against enhanced audio.
-- [ ] **Voice Boost profiles.** NATURAL / CLEAR / STUDIO presets + independent
+- [x] **Voice Boost profiles.** NATURAL / CLEAR / STUDIO presets + independent
   per-control overrides, global defaults and per-call settings, master
-  switchable off (bypass preserves original audio exactly).
+  switchable off (bypass preserves original audio exactly). Engine shipped in
+  `6a1b17f`; settings surface (config-in-db `voice_boost_settings`, per-session
+  override column, `GET/PUT /api/v1/voice/boost/settings`, validated JSON seam
+  to the Rust engine via `voice_boost_config_from_json`) shipped 2026-11-13.
+  *Still open: live-call application waits on the M7 media transport; console
+  Boost panel ships with the dashboard item.*
 - [ ] **Open-source multilingual transcription.** WhisperLiveKit + faster-whisper
   as primary engine (no paid cloud ASR); licenses verified before integration;
   model-size choice by benchmark on available hardware. Streaming + batch,
@@ -247,6 +271,89 @@ implementation and measurements.
   docs, Docker deployment, benchmark reports, troubleshooting, security,
   licensing inventory; final engineering report with measured results and
   stated limitations.
+
+## M10 — Audio Generation Studio (the PRODUCE half)
+
+Operator-facing TTS asset production: script → generated, previewable,
+downloadable audio files with a managed asset library. Pipeline role: this is
+the platform's voice-of-record — multilingual spoken content produced ahead of
+a campaign rather than synthesized live, so what callers hear is reviewed,
+consistent, and auditable. It runs through the same config, auth, audit, and
+storage conventions as every other stage and must not disturb the live call
+path while it lands (the regression suite pins existing behavior throughout —
+that is an implementation discipline of one product, not a sign of a separate
+one). Phased delivery per the implementation spec (repo inspection → TTS
+abstraction → generation API → assets → console UI → long-form → batch →
+post-processing → tests → docs); each phase ends testable.
+
+- [ ] **Phase A — TTS provider abstraction + first provider.**
+  Provider-independent interface (`TTSProvider`) behind the orchestrator's
+  config conventions (env-seeded config-in-db, credentials never in source or
+  frontend). First integration: OpenAI TTS against the documented REST contract
+  with fake-transport tests (the Twilio-adapter pattern: contract-verified,
+  live-unverified honesty labels). Azure/Google deferred until needed — the
+  interface admits them without rewriting the module; no SDK installs without
+  an integration need. Capability honesty per `voice_providers.py`: voices,
+  languages, speeds, and expressive controls are listed ONLY as the selected
+  provider exposes them; unsupported selections are refused, never silently
+  defaulted. Pipeline connection: the provider registry rides the same
+  capability-honesty machinery as the M9/P7 STT/TTS routing table — dated,
+  provenanced entries or `UNVERIFIED`/`attemptable: false`; the language
+  priority list (en/hi/ml/kn/ta/te, code-switching tested not assumed) is one
+  shared list with M9's transcription item, so what the platform can SAY and
+  what it can HEAR advance together, in the same languages, verified to the
+  same bar.
+- [ ] **Phase B — Generation API + asset library.** Dedicated routes
+  (`/api/v1/audio/*`, isolated from telephony APIs), existing bearer
+  auth + writer gating + audit, per-tenant asset rows in the existing Database
+  seam (metadata: script reference, provider, voice, language, format,
+  duration, size, status, storage location, processing history). Local file
+  store with path-traversal-safe names, size/duration limits, and
+  download authorization. Preview, download, rename, delete, search/filter.
+- [ ] **Phase C — Formats + optional non-destructive post-processing.**
+  Provider-native formats pass through untouched; conversion is performed only
+  where actually implementable in-repo (WAV/PCM, sample-rate and mono/stereo
+  via the stdlib — the no-ffmpeg ruling stands unless a deployment need
+  reopens it) and NEVER by renaming extensions. Post-processing (normalization,
+  silence trimming, channel/rate conversion) is optional and always produces a
+  new asset variant; the original is preserved byte-identical. Pipeline
+  connection: post-processing reuses the M9 Voice Boost DSP components (AGC,
+  look-ahead limiter, real resampler, clipping detection from
+  `crates/voice-runtime/src/dsp.rs`) — one DSP layer serves both directions of
+  the pipeline, and generated assets may optionally be enhanced with a Voice
+  Boost profile (NATURAL/CLEAR/STUDIO) through the same settings-resolution
+  surface built for calls, never destructively.
+- [ ] **Phase D — Long-form generation.** Paragraph-preserving chunking,
+  ordered sequential assembly, consistent voice settings across chunks,
+  per-chunk failure tracking with retry-without-regeneration, assembled-file
+  validation.
+- [ ] **Phase E — Batch generation.** CSV intake with structure validation and
+  preview, default + per-record voice, background processing through the
+  worker-loop pattern (never blocking the call worker or real-time paths),
+  per-record status, retry of failed records only, downloadable generation
+  report, provider rate-limit awareness.
+- [ ] **Phase F — Console Audio Generation section.** Generate / Batch /
+  Library / Processing / Settings views inside the existing console design
+  language and navigation (no dashboard redesign); generated TS client types
+  follow the OpenAPI generation convention.
+- [ ] **Phase G — Tests + docs.** Mocked-provider tests only (zero paid API
+  calls in the standard suite): generation, provider abstraction, voice/language
+  selection, format validation/conversion, chunking, assembly, batch
+  validation/retries, storage, download authorization, failure handling. Full
+  regression suite stays green. Documentation: module architecture, provider
+  configuration, honesty matrix.
+
+**Contract boundary (stands from M7/P9):** the live voice-session path keeps
+server-authoritative TTS only — spoken content in calls comes exclusively from
+the agent or the instruction store, and `/voice-sessions/{id}/say` stays 404.
+Within the one pipeline, produced assets are campaign-ready material reviewed
+by operators, not a client-controlled injection into a running call; both
+boundaries are pinned by tests side by side so neither erodes the other.
+Speech analytics (M9) may sanity-check generated assets — one measurement
+harness serving the whole pipeline, never claiming call-grade measurement for
+studio content. Nothing feeds synthesized audio back into live calls except
+through the agent/instruction path; that stays a P9-pinned non-path until
+record consents explicitly classify it (M8 open item).
 
 ## Explicit non-goals (patterns rejected from competitor adoption)
 

@@ -211,3 +211,42 @@ green (SQLite + Postgres); ruff clean; mypy: 3 pre-existing
 import-untyped notes on third-party modules (voxora_voice_runtime,
 pyreverseetl) unchanged. Not verified live: no real telephony, no real
 LLM, no live Squid — unchanged honest boundaries.
+
+## M9 Voice Boost settings surface (2026-11-13, verified this session)
+
+Plan `docs/superpowers/plans/2026-11-13-voice-boost-settings.md`.
+
+- **Rust seam** (`crates/voice-runtime/src/dsp.rs::config_from_settings_json`
+  + pybridge `voice_boost_config_from_json`): the orchestrator-facing
+  `{"enabled", "profile", "overrides"}` document resolves into a
+  `VoiceBoostConfig` — unknown profiles/keys, wrong types, and out-of-range
+  numbers rejected (never clamped); `enabled: false` ⇒ bypass with overrides
+  resolved-inert. Verified: 4 new dsp tests + pybridge round-trip
+  (cargo 115 green); the function is proven through the REAL extension via
+  the maturin-built wheel (`make py-voice`), not mocks.
+  Honest note: `cargo test --features pyo3-bindings` cannot link in this
+  environment (extension-module feature) — compile is verified with
+  `cargo check --features pyo3-bindings`, function behavior via the wheel.
+- **Storage**: `voice_boost_settings` config-in-db table (profile + enabled
+  master switch + overrides config; seed-once builtin CLEAR/enabled) plus a
+  per-session `voice_boost` override column on `voice_sessions`; parity
+  migrations for both backends (a shared persistent Postgres server exposed
+  the schema-upgrade gap and got the `enabled` migration).
+- **Resolution**: `voice_boost.py::resolve_voice_boost_settings` merges
+  stored global defaults with the current session override only — session
+  overrides never persist into global defaults (tested).
+- **API**: `GET/PUT /api/v1/voice/boost/settings` (PUT writer-gated, audited
+  `voice_boost.settings_updated`; validation 422s pinned: unknown control
+  key, out-of-range strengths/target, unknown profile), and per-session
+  `voice_boost` override on `POST /api/v1/voice-sessions` resolved in the
+  session view (`profile` inherited, `overrides` merged).
+- **Seam tests**: `tests/test_voice_boost_seam.py` (3 tests) drive the real
+  extension — settings resolve, disabled ⇒ Rust bypass, API-rejected input
+  rejected identically at the seam.
+- Honest boundary: the DSP executes inside the Rust media engine (tested
+  there); live-call application waits on the M7 media transport. The M7/P9
+  contract stands: `/voice-sessions/{id}/say` stays 404; no client-controlled
+  call speech.
+
+Full suite this session: 295 orchestrator tests green (SQLite + Postgres),
+ruff + mypy clean, cargo 115 green both verification paths.
