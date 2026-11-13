@@ -43,6 +43,7 @@ from .models import (
     TurnProviderFailure,
     TurnSemanticReport,
     TurnTranscript,
+    VoiceBoostSettingsUpdate,
     VoiceSessionCreate,
 )
 from .observability import configure_logging
@@ -1175,6 +1176,47 @@ def create_app(
         except ValueError as error:
             raise ApiError(500, f"voice provider routing config invalid: {error}", "routing_config_invalid") from None
         return {"configured": configured, **status}
+
+    # ------------------------------------------- voice boost settings (M9)
+    @app.get("/api/v1/voice/boost/settings")
+    def get_voice_boost_settings(
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        """Resolved global Voice Boost defaults for the tenant.
+
+        Seeds the builtin CLEAR/enabled row once for a fresh tenant. The DSP
+        executes inside the Rust media engine; live-call application waits on
+        the M7 media transport (no claim that live calls are enhanced today).
+        """
+        from .voice_boost import resolve_voice_boost_settings
+
+        return resolve_voice_boost_settings(app.state.db, principal.tenant_id, None)
+
+    @app.put("/api/v1/voice/boost/settings")
+    def put_voice_boost_settings(
+        payload: VoiceBoostSettingsUpdate,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        _require_writer(principal)
+        stored = app.state.db.put_voice_boost_settings(
+            principal.tenant_id,
+            payload.profile,
+            payload.overrides.resolved(),
+            enabled=payload.enabled,
+        )
+        app.state.db.audit(
+            principal.tenant_id,
+            principal.name,
+            "voice_boost.settings_updated",
+            "voice_boost_settings",
+            principal.tenant_id,
+            {"profile": stored["profile"], "enabled": stored["enabled"]},
+        )
+        return {
+            "profile": stored["profile"],
+            "overrides": stored.get("config") or {},
+            "enabled": bool(stored.get("enabled", True)),
+        }
 
     # ------------------------------------------------------------- contacts
     @app.get("/api/v1/contacts")

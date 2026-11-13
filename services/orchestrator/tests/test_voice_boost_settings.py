@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 import pytest
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from voxora.db import Database
@@ -110,3 +111,128 @@ def test_override_rejects_unknown_key_and_bad_ranges() -> None:
         VoiceBoostControlOverrides.model_validate({"ns_strength": 1.5})
     with pytest.raises(ValidationError):
         VoiceBoostControlOverrides.model_validate({"agc_target_dbfs": -3.0})
+
+
+# ------------------------------------------------------------------ HTTP API
+
+AUTH = {"Authorization": "Bearer admin-token"}
+
+
+def _session_payload(agent_id: str, external_session_id: str = "boost_001") -> Dict[str, Any]:
+    return {
+        "external_application": "pyinterviewbot",
+        "external_session_id": external_session_id,
+        "contact": {
+            "external_contact_id": "contact_boost",
+            "name": "Candidate Boost",
+            "phone": "+15558009999",
+        },
+        "agent": {"agent_id": agent_id, "model_profile": "default"},
+        "session_metadata": {},
+        "webhook_url": None,
+    }
+
+
+def _seed_agent_and_consent(client: TestClient) -> str:
+    agent_id = client.post(
+        "/api/v1/agents", json={"name": "Boost Agent"}, headers=AUTH
+    ).json()["id"]
+    contact = client.post(
+        "/api/v1/contacts",
+        json={"first_name": "B", "last_name": "C", "phone": "+15558009999"},
+        headers=AUTH,
+    )
+    client.patch(
+        f"/api/v1/contacts/{contact.json()['id']}/consent",
+        json={"state": "granted", "source": "operator"},
+        headers=AUTH,
+    )
+    return agent_id
+
+
+def test_get_seeds_and_returns_defaults(client: TestClient) -> None:
+    response = client.get("/api/v1/voice/boost/settings", headers=AUTH)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["profile"] == "clear"
+    assert body["overrides"] == {}
+    assert body["enabled"] is True
+
+
+def test_put_updates_and_audits(client: TestClient) -> None:
+    response = client.put(
+        "/api/v1/voice/boost/settings",
+        json={"profile": "studio", "overrides": {"ns_strength": 0.9}},
+        headers=AUTH,
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["profile"] == "studio"
+    again = client.get("/api/v1/voice/boost/settings", headers=AUTH).json()
+    assert again["profile"] == "studio"
+    assert again["overrides"] == {"ns_strength": 0.9}
+    audit = client.get("/api/v1/audit", headers=AUTH).json()["data"]
+    assert "voice_boost.settings_updated" in [item["action"] for item in audit]
+
+
+def test_put_rejects_unknown_control_key(client: TestClient) -> None:
+    response = client.put(
+        "/api/v1/voice/boost/settings",
+        json={"overrides": {"reverb": True}},
+        headers=AUTH,
+    )
+    assert response.status_code == 422
+
+
+def test_put_rejects_out_of_range_strength(client: TestClient) -> None:
+    assert (
+        client.put(
+            "/api/v1/voice/boost/settings",
+            json={"overrides": {"ns_strength": 1.5}},
+            headers=AUTH,
+        ).status_code
+        == 422
+    )
+    assert (
+        client.put(
+            "/api/v1/voice/boost/settings",
+            json={"overrides": {"agc_target_dbfs": -3.0}},
+            headers=AUTH,
+        ).status_code
+        == 422
+    )
+
+
+def test_put_rejects_unknown_profile(client: TestClient) -> None:
+    assert (
+        client.put(
+            "/api/v1/voice/boost/settings",
+            json={"profile": "loud"},
+            headers=AUTH,
+        ).status_code
+        == 422
+    )
+
+
+def test_session_override_resolves_in_view(client: TestClient) -> None:
+    client.put(
+        "/api/v1/voice/boost/settings",
+        json={"profile": "studio"},
+        headers=AUTH,
+    )
+    agent_id = _seed_agent_and_consent(client)
+    payload = _session_payload(agent_id)
+    payload["voice_boost"] = {"overrides": {"eq": False}}
+    response = client.post("/api/v1/voice-sessions", json=payload, headers=AUTH)
+    assert response.status_code == 201, response.text
+    view = response.json()["session"] if "session" in response.json() else response.json()
+    resolved = view["voice_boost"]
+    assert resolved["profile"] == "studio"  # inherited from global defaults
+    assert resolved["overrides"] == {"eq": False}  # session override applied
+
+
+def test_session_intake_rejects_invalid_override(client: TestClient) -> None:
+    agent_id = _seed_agent_and_consent(client)
+    payload = _session_payload(agent_id, external_session_id="boost_bad")
+    payload["voice_boost"] = {"profile": "loud"}
+    response = client.post("/api/v1/voice-sessions", json=payload, headers=AUTH)
+    assert response.status_code == 422
