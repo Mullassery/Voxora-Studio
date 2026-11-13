@@ -130,6 +130,18 @@ mod _py {
         Ok(to_python_json(&result.0, &result.1))
     }
 
+    /// Voice Boost settings seam: the orchestrator's validated settings
+    /// document (`{"enabled", "profile", "overrides"}`) resolves into the
+    /// canonical per-call `VoiceBoostConfig` JSON. This is the constructor
+    /// the media transport will call when it mounts (M7 open seam).
+    #[pyfunction]
+    #[pyo3(signature = (settings_json))]
+    fn voice_boost_config_from_json(settings_json: &str) -> PyResult<String> {
+        let config = crate::dsp::config_from_settings_json(settings_json)
+            .map_err(PyValueError::new_err)?;
+        Ok(serde_json::to_string(&config).expect("voice boost config serializes"))
+    }
+
     /* ---------------------- turn detection engine ---------------------- */
 
     /// Live turn-detection seam: one Rust `TurnDetectionController` per
@@ -343,6 +355,7 @@ mod _py {
     #[pyo3(name = "voxora_voice_runtime")]
     fn voxora_voice_runtime(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(run_scripted_call_json, m)?)?;
+        m.add_function(wrap_pyfunction!(voice_boost_config_from_json, m)?)?;
         m.add_class::<TurnDetectionEngine>()?;
         m.add("__version__", env!("CARGO_PKG_VERSION"))?;
         Ok(())
@@ -405,6 +418,19 @@ mod _py {
             let mut backend = JsonScriptBackend { turns: script.turns, cursor: 0 };
             let result = run_with_timing(&mut backend, 16, u64::MAX);
             assert_eq!(result.unwrap_err(), crate::bridge::BridgeError::EmptyDialog);
+        }
+
+        #[test]
+        fn voice_boost_config_json_round_trips_through_seam() {
+            let resolved = voice_boost_config_from_json(
+                r#"{"profile":"natural","overrides":{"ns_strength":0.4}}"#,
+            )
+            .expect("valid settings");
+            let parsed: serde_json::Value = serde_json::from_str(&resolved).unwrap();
+            assert_eq!(parsed["ns_strength"], 0.4);
+            assert_eq!(parsed["eq"], false); // NATURAL preset
+            let err = voice_boost_config_from_json(r#"{"profile":"loud"}"#).unwrap_err();
+            assert!(err.to_string().contains("loud"));
         }
     }
 }

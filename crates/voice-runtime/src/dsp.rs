@@ -448,7 +448,7 @@ pub enum VoiceBoostProfile {
 /// Independently configurable DSP controls with profile presets and
 /// per-control overrides. Global *defaults* live with the orchestrator; this
 /// struct is the per-call instantiated configuration.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct VoiceBoostConfig {
     /// Master switch: identity passthrough when true (bytes preserved).
@@ -527,6 +527,140 @@ impl VoiceBoostConfig {
         self.normalize = enabled;
         self
     }
+}
+
+/// Validated resolution of the orchestrator-facing settings document into a
+/// per-call config: `{"enabled": bool, "profile": "natural|clear|studio",
+/// "overrides": {control: value}}`. Unknown profiles, unknown override keys,
+/// wrong types, and out-of-range numbers are rejected (never clamped) — the
+/// API boundary refuses to silently reinterpret operator intent. Ranges:
+/// `ns_strength`/`de_ess_strength` 0..=1, `agc_target_dbfs` -60..=-6,
+/// `agc_max_boost_db`/`agc_max_cut_db` (0, 48]. `enabled: false` maps to
+/// `bypass: true` (original audio preserved exactly) while overrides stay
+/// resolved so re-enabling is lossless.
+pub fn config_from_settings_json(settings_json: &str) -> Result<VoiceBoostConfig, String> {
+    let value: serde_json::Value = serde_json::from_str(settings_json)
+        .map_err(|e| format!("invalid voice boost settings JSON: {e}"))?;
+    let obj = value
+        .as_object()
+        .ok_or_else(|| "voice boost settings must be a JSON object".to_string())?;
+
+    let enabled = match obj.get("enabled") {
+        None | Some(serde_json::Value::Null) => true,
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(other) => return Err(format!("enabled must be a boolean, got: {other}")),
+    };
+    let profile = match obj.get("profile") {
+        None | Some(serde_json::Value::Null) => VoiceBoostProfile::Clear,
+        Some(serde_json::Value::String(name)) => serde_json::from_value::<VoiceBoostProfile>(
+            serde_json::Value::String(name.clone()),
+        )
+        .map_err(|_| {
+            format!("unknown voice boost profile: {name} (natural|clear|studio)")
+        })?,
+        Some(other) => return Err(format!("profile must be a string, got: {other}")),
+    };
+    let overrides = match obj.get("overrides") {
+        None | Some(serde_json::Value::Null) => serde_json::Map::new(),
+        Some(serde_json::Value::Object(map)) => map.clone(),
+        Some(other) => return Err(format!("overrides must be an object, got: {other}")),
+    };
+
+    let mut config = VoiceBoostConfig::for_profile(profile);
+    for (key, val) in &overrides {
+        match key.as_str() {
+            "noise_suppression" => {
+                let on = bool_of(key, val)?;
+                config.noise_suppression = on;
+            }
+            "ns_strength" => {
+                let v = strength_of(key, val)?;
+                config.noise_suppression = true;
+                config.ns_strength = v;
+            }
+            "agc" => {
+                let on = bool_of(key, val)?;
+                config.agc = on;
+            }
+            "agc_target_dbfs" => {
+                let v = number_of(key, val)?;
+                if !(-60.0..=-6.0).contains(&v) {
+                    return Err(format!("{key} must be in [-60.0, -6.0] dbfs, got: {v}"));
+                }
+                config.agc_target_dbfs = v as f32;
+            }
+            "agc_max_boost_db" => {
+                let v = range_of(key, val, 0.0, 48.0, true)?;
+                config.agc_max_boost_db = v;
+            }
+            "agc_max_cut_db" => {
+                let v = range_of(key, val, 0.0, 48.0, true)?;
+                config.agc_max_cut_db = v;
+            }
+            "normalize" => config.normalize = bool_of(key, val)?,
+            "eq" => config.eq = bool_of(key, val)?,
+            "de_ess" => {
+                let on = bool_of(key, val)?;
+                config.de_ess = on;
+            }
+            "de_ess_strength" => {
+                let v = strength_of(key, val)?;
+                config.de_ess = true;
+                config.de_ess_strength = v;
+            }
+            "clipping_watch" => config.clipping_watch = bool_of(key, val)?,
+            other => {
+                return Err(format!(
+                    "unknown voice boost control: {other} (allowed: noise_suppression, \
+                     ns_strength, agc, agc_target_dbfs, agc_max_boost_db, agc_max_cut_db, \
+                     normalize, eq, de_ess, de_ess_strength, clipping_watch)"
+                ))
+            }
+        }
+    }
+    if !enabled {
+        config.bypass = true;
+    }
+    Ok(config)
+}
+
+fn bool_of(key: &str, val: &serde_json::Value) -> Result<bool, String> {
+    match val {
+        serde_json::Value::Bool(b) => Ok(*b),
+        other => Err(format!("{key} must be a boolean, got: {other}")),
+    }
+}
+
+fn number_of(key: &str, val: &serde_json::Value) -> Result<f64, String> {
+    match val {
+        serde_json::Value::Number(n) => n
+            .as_f64()
+            .ok_or_else(|| format!("{key} must be a finite number, got: {val}")),
+        other => Err(format!("{key} must be a number, got: {other}")),
+    }
+}
+
+fn strength_of(key: &str, val: &serde_json::Value) -> Result<f32, String> {
+    let v = number_of(key, val)?;
+    if !(0.0..=1.0).contains(&v) {
+        return Err(format!("{key} must be in [0.0, 1.0], got: {v}"));
+    }
+    Ok(v as f32)
+}
+
+fn range_of(
+    key: &str,
+    val: &serde_json::Value,
+    min: f64,
+    max: f64,
+    exclusive_min: bool,
+) -> Result<f32, String> {
+    let v = number_of(key, val)?;
+    let in_range = (min..=max).contains(&v) && (!exclusive_min || v > min);
+    if !in_range {
+        return Err(format!("{key} must be in ({min}, {max}] db, got: {v}"));
+    }
+    Ok(v as f32)
 }
 
 /// Per-stage processing stats (serde for the future diagnostics API).
@@ -863,6 +997,41 @@ mod tests {
             de_ess_strength: 0.0,
             clipping_watch: true,
         }
+    }
+
+    #[test]
+    fn settings_json_defaults_to_clear_enabled() {
+        let config = config_from_settings_json("{}").expect("empty settings valid");
+        assert_eq!(config, VoiceBoostConfig::for_profile(VoiceBoostProfile::Clear));
+        assert!(!config.bypass);
+    }
+
+    #[test]
+    fn settings_json_applies_profile_and_overrides() {
+        let json = r#"{"profile":"studio","overrides":{"ns_strength":0.9,"eq":false}}"#;
+        let config = config_from_settings_json(json).expect("valid");
+        let expected = VoiceBoostConfig::for_profile(VoiceBoostProfile::Studio)
+            .with_noise_suppression(true, 0.9)
+            .with_eq(false);
+        assert_eq!(config, expected);
+    }
+
+    #[test]
+    fn disabled_maps_to_bypass() {
+        let json = r#"{"enabled":false,"profile":"clear","overrides":{"ns_strength":0.5}}"#;
+        let config = config_from_settings_json(json).expect("valid");
+        assert!(config.bypass);
+        // Overrides stay resolved (inert while disabled) so re-enabling is lossless.
+        assert!((config.ns_strength - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn settings_json_rejects_unknown_profile_and_keys_and_ranges() {
+        assert!(config_from_settings_json(r#"{"profile":"loud"}"#).is_err());
+        assert!(config_from_settings_json(r#"{"overrides":{"reverb":true}}"#).is_err());
+        assert!(config_from_settings_json(r#"{"overrides":{"ns_strength":1.5}}"#).is_err());
+        assert!(config_from_settings_json(r#"{"overrides":{"agc_target_dbfs":0.0}}"#).is_err());
+        assert!(config_from_settings_json(r#"{"overrides":{"ns_strength":"high"}}"#).is_err());
     }
 
     #[test]
