@@ -1012,6 +1012,7 @@ class Database:
             "webhook_url",
             "recording_url",
             "recording_sid",
+            "voice_boost",
         }
         updates = [(key, value) for key, value in fields.items() if key in allowed]
         if not updates:
@@ -1019,7 +1020,7 @@ class Database:
         setters = ", ".join(f"{key}=?" for key, _ in updates)
         params: List[Any] = []
         for key, value in updates:
-            params.append(json.dumps(value) if key in ("transcript",) else value)
+            params.append(json.dumps(value) if key in ("transcript", "voice_boost") else value)
         params += [iso(), tenant_id, session_id]
         with self._write() as connection:
             connection.execute(

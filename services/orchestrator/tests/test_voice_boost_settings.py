@@ -236,3 +236,23 @@ def test_session_intake_rejects_invalid_override(client: TestClient) -> None:
     payload["voice_boost"] = {"profile": "loud"}
     response = client.post("/api/v1/voice-sessions", json=payload, headers=AUTH)
     assert response.status_code == 422
+
+
+def test_update_voice_session_accepts_voice_boost(database: Database) -> None:
+    database.ensure_tenant(TENANT, "Tenant")
+    created = database.create_voice_session(TENANT, _session_values({}))
+    updated = database.update_voice_session(
+        TENANT, created["id"], voice_boost={"profile": "natural", "overrides": {"eq": False}}
+    )
+    assert updated is not None
+    assert updated["voice_boost"] == {"profile": "natural", "overrides": {"eq": False}}
+
+
+def test_update_voice_session_accepts_voice_boost(database: Database) -> None:
+    database.ensure_tenant(TENANT, "Tenant")
+    created = database.create_voice_session(TENANT, _session_values({}))
+    updated = database.update_voice_session(
+        TENANT, created["id"], voice_boost={"profile": "natural", "overrides": {"eq": False}}
+    )
+    assert updated is not None
+    assert updated["voice_boost"] == {"profile": "natural", "overrides": {"eq": False}}
