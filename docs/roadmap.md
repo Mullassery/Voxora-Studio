@@ -286,7 +286,7 @@ one). Phased delivery per the implementation spec (repo inspection → TTS
 abstraction → generation API → assets → console UI → long-form → batch →
 post-processing → tests → docs); each phase ends testable.
 
-- [ ] **Phase A — TTS provider abstraction + first provider.**
+- [x] **Phase A — TTS provider abstraction + first provider.**
   Provider-independent interface (`TTSProvider`) behind the orchestrator's
   config conventions (env-seeded config-in-db, credentials never in source or
   frontend). First integration: OpenAI TTS against the documented REST contract
@@ -303,7 +303,7 @@ post-processing → tests → docs); each phase ends testable.
   shared list with M9's transcription item, so what the platform can SAY and
   what it can HEAR advance together, in the same languages, verified to the
   same bar.
-- [ ] **Phase B — Generation API + asset library.** Dedicated routes
+- [x] **Phase B — Generation API + asset library.** Dedicated routes
   (`/api/v1/audio/*`, isolated from telephony APIs), existing bearer
   auth + writer gating + audit, per-tenant asset rows in the existing Database
   seam (metadata: script reference, provider, voice, language, format,
