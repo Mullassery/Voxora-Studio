@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
 from . import __version__
+from .audio_assets import AudioFileStore, AudioGenerationError, generate_asset
 from .campaign import CampaignEngine, CampaignError
 from .config import Settings, TenantPrincipal
 from .crm import build_crm_adapter, provider_catalog
@@ -24,6 +25,7 @@ from .models import (
     AgentCreate,
     AiDecideRequest,
     AudienceImport,
+    AudioAssetGenerate,
     CampaignCreate,
     CampaignSyncRequest,
     ConsentUpdate,
@@ -51,6 +53,7 @@ from .security import SecretBox, safe_equal
 from .seed import seed_demo
 from .state import InvalidTransition
 from .telephony import build_telephony_adapter, telephony_provider_status
+from .tts_generation import build_tts_provider
 from .voice_turn_detection import (
     AGENT_EVENT_KINDS,
     ENDPOINT_PROFILES,
@@ -1217,6 +1220,123 @@ def create_app(
             "overrides": stored.get("config") or {},
             "enabled": bool(stored.get("enabled", True)),
         }
+
+    # --------------------------------- audio generation assets (M10 Phase B)
+    @app.post("/api/v1/audio-assets/generate", status_code=201)
+    def generate_audio_asset(
+        payload: AudioAssetGenerate,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        """Generate one audio asset (operator surface; never the call loop).
+
+        Unconfigured provider → 501; provider refusal → 502 with a sanitized
+        detail (provider messages never reach clients, keys never leak).
+        """
+        _require_writer(principal)
+        try:
+            asset = generate_asset(
+                app.state.db,
+                app.state.settings,
+                principal.tenant_id,
+                principal.name,
+                payload.model_dump(),
+            )
+        except ValueError as error:
+            raise ApiError(501, str(error), "audio_provider_unconfigured") from None
+        except AudioGenerationError as error:
+            raise ApiError(502, error.detail, "audio_provider_failed") from None
+        app.state.db.audit(
+            principal.tenant_id,
+            principal.name,
+            "audio.asset_generated",
+            "audio_asset",
+            asset["id"],
+            {"provider": asset["provider"], "voice": asset["voice"], "format": asset["format"]},
+        )
+        return asset
+
+    @app.get("/api/v1/audio-assets")
+    def list_audio_assets(
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        search: Optional[str] = Query(default=None, max_length=120),
+        status: Optional[str] = Query(default=None, max_length=40),
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        items, total = app.state.db.list_audio_assets(
+            principal.tenant_id, limit, offset, search, status
+        )
+        return _page(items, total, limit, offset)
+
+    @app.get("/api/v1/audio-assets/{asset_id}")
+    def get_audio_asset(
+        asset_id: str,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        asset = app.state.db.get_audio_asset(principal.tenant_id, asset_id)
+        if asset is None:
+            raise ApiError(404, "audio asset not found", "not_found")
+        return asset
+
+    @app.get("/api/v1/audio-assets/{asset_id}/download")
+    def download_audio_asset(
+        asset_id: str,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Response:
+        asset = app.state.db.get_audio_asset(principal.tenant_id, asset_id)
+        if asset is None:
+            raise ApiError(404, "audio asset not found", "not_found")
+        store = AudioFileStore(app.state.settings.audio_storage_path)
+        path = store.path_for(principal.tenant_id, asset_id, asset["format"])
+        if not path.exists():
+            raise ApiError(404, "audio asset file missing", "file_missing")
+        content_type, disposition = store.download_headers(asset["title"], asset["format"])
+        return Response(
+            content=path.read_bytes(),
+            media_type=content_type,
+            headers={"Content-Disposition": disposition},
+        )
+
+    @app.delete("/api/v1/audio-assets/{asset_id}")
+    def delete_audio_asset(
+        asset_id: str,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        _require_writer(principal)
+        asset = app.state.db.get_audio_asset(principal.tenant_id, asset_id)
+        if asset is None or not app.state.db.delete_audio_asset(
+            principal.tenant_id, asset_id
+        ):
+            raise ApiError(404, "audio asset not found", "not_found")
+        store = AudioFileStore(app.state.settings.audio_storage_path)
+        store.delete(store.path_for(principal.tenant_id, asset_id, asset["format"]))
+        app.state.db.audit(
+            principal.tenant_id,
+            principal.name,
+            "audio.asset_deleted",
+            "audio_asset",
+            asset_id,
+            {"title": asset["title"]},
+        )
+        return {"deleted": True, "id": asset_id}
+
+    @app.get("/api/v1/audio/providers")
+    def audio_provider_status(
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        """Capability-honest TTS provider status, mirroring voice_providers."""
+        settings: Settings = app.state.settings
+        try:
+            provider = build_tts_provider(settings)
+            status = provider.status()
+        except ValueError as error:
+            status = {
+                "configured": False,
+                "live": False,
+                "simulated": False,
+                "detail": str(error),
+            }
+        return {"configured_provider": settings.audio_tts_provider, **status}
 
     # ------------------------------------------------------------- contacts
     @app.get("/api/v1/contacts")

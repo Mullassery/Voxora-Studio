@@ -128,6 +128,32 @@ class VoiceBoostSettingsUpdate(BaseModel):
     overrides: VoiceBoostControlOverrides = Field(default_factory=VoiceBoostControlOverrides)
 
 
+class AudioAssetGenerate(BaseModel):
+    """One text-to-speech generation request (operator asset surface).
+
+    Script cap 4096 mirrors the documented provider limit; long-form chunking
+    ships with Phase D. `language` is recorded metadata only — OpenAI exposes
+    no language-selection parameter (voices are English-optimized per docs).
+    """
+
+    model_config = {"extra": "forbid"}
+
+    script: str = Field(min_length=1, max_length=4096)
+    voice: str = Field(min_length=1, max_length=80)
+    model: Literal["tts-1", "tts-1-hd", "gpt-4o-mini-tts"] = "tts-1"
+    speed: float = Field(default=1.0, ge=0.25, le=4.0)
+    response_format: Literal["mp3", "opus", "aac", "flac", "wav", "pcm"] = "mp3"
+    instructions: Optional[str] = Field(default=None, max_length=4096)
+    title: Optional[str] = Field(default=None, max_length=120)
+    language: Optional[str] = Field(default=None, max_length=40)
+
+    @model_validator(mode="after")
+    def _instructions_only_on_capable_models(self) -> "AudioAssetGenerate":
+        if self.instructions is not None and self.model != "gpt-4o-mini-tts":
+            raise ValueError("instructions is only supported with gpt-4o-mini-tts")
+        return self
+
+
 class VoiceSessionCreate(BaseModel):
     """Voice-session intake per the ecosystem ADR (ADR-3B).
 
