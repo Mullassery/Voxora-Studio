@@ -250,3 +250,47 @@ Plan `docs/superpowers/plans/2026-11-13-voice-boost-settings.md`.
 
 Full suite this session: 295 orchestrator tests green (SQLite + Postgres),
 ruff + mypy clean, cargo 115 green both verification paths.
+
+## M10 Audio Generation, Phases A-B (2026-11-13, verified this session)
+
+What shipped (the PRODUCE half of the M9+M10 voice pipeline — the operator-asset
+surface, deliberately separate from the live call path):
+
+- **Provider abstraction** (`tts_generation.py`): `TTSProvider` protocol with two
+  implementations — `MockTTSProvider` (deterministic sine WAV, honestly labeled
+  `simulated: true`; the in-repo simulation engine, zero paid API calls) and
+  `OpenAITTSProvider` implemented against the DOCUMENTED REST contract
+  (`POST /v1/audio/speech` — developers.openai.com, retrieved 2026-11-13) with
+  injectable transport and fake-transport tests. Contract-verified,
+  LIVE-UNVERIFIED: no credentials exist in this environment. The provider
+  exposes exactly the documented surface (13 voices, `tts-1|tts-1-hd|
+  gpt-4o-mini-tts`, 6 formats, speed 0.25-4.0); `instructions` only on
+  gpt-4o-mini-tts (refused at the model layer, dropped at the provider layer).
+  OpenAI exposes NO language-selection parameter — language is recorded
+  metadata only. Provider errors are sanitized: detail never carries the key
+  or reaches clients.
+- **Storage + validation** (`audio_assets.py`): paths built ONLY from internal
+  ids (no user input ever reaches a path; id regex-validated), 50MB blob cap,
+  WAV duration via stdlib `wave` (no-ffmpeg ruling stands) — compressed formats
+  report `duration_seconds: None`, never zero-fabricated. Provider failure
+  leaves NO row and NO file behind (tested). Download headers are sanitized
+  against hostile titles (quotes/CR/LF/path chars).
+- **Persistence**: `audio_assets` table on BOTH backends (parity migrations),
+  `parent_asset_id` + `processing_history` columns exist NOW for Phase C
+  variants; title search is `LOWER(title) LIKE LOWER(?)` for cross-backend
+  case-insensitivity (Postgres LIKE is case-sensitive, SQLite is not).
+- **API**: `POST /api/v1/audio-assets/generate` (writer-gated, 201; unconfigured
+  provider → 501 `audio_provider_unconfigured`, provider refusal → 502
+  sanitized), `GET /api/v1/audio-assets` (repo `_page` convention), `GET
+  .../audio-assets/{id}`, `GET .../download` (sanitized Content-Disposition),
+  `DELETE .../{id}` (row + file, audited), and `GET /api/v1/audio/providers`
+  mirroring the voice_providers capability-honesty pattern (never fakes
+  success; unconfigured returns an honest body, 501 only at generate time).
+- **The M7/P9 boundary stands**: `/voice-sessions/{id}/say` stays 404 (pinned
+  in `test_audio_api.py`). Generated audio never enters the call loop.
+
+Verified this session: `test_tts_generation.py` (11) + `test_audio_assets.py`
+(22, SQLite + Postgres) + `test_audio_api.py` (6) — full suite 356 green,
+ruff clean, mypy clean apart from the pre-existing pyreverseetl
+import-untyped note. Remaining Phase C-G (variants/post-processing, script
+chunking + long-form, batch/background jobs) are planned, not claimed.
