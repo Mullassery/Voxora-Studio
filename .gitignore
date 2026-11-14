@@ -18,3 +18,4 @@ target/
 *.log
 .vite/
 *.egg-info/
+data/
