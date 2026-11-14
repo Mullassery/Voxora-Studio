@@ -104,6 +104,9 @@ class Settings:
     turn_diagnostics_engines: int = 64
     voice_provider_adapters: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     voice_provider_chains: Dict[str, List[str]] = field(default_factory=dict)
+    audio_tts_provider: str = "mock"
+    audio_storage_path: str = "data/audio_assets"
+    openai_api_key: Optional[str] = None
     log_level: str = "INFO"
 
     @classmethod
@@ -140,6 +143,9 @@ class Settings:
                 "development-only-outbound-webhook-secret-0123456",
             ),
             webhook_transport=os.getenv("VOXORA_WEBHOOK_TRANSPORT", "direct").strip().lower(),
+            audio_tts_provider=os.getenv("VOXORA_AUDIO_TTS_PROVIDER", "mock").strip().lower(),
+            audio_storage_path=os.getenv("VOXORA_AUDIO_STORAGE_PATH", "data/audio_assets"),
+            openai_api_key=os.getenv("OPENAI_API_KEY") or None,
             webhook_dead_letter_path=os.getenv("VOXORA_WEBHOOK_DEAD_LETTER_PATH") or None,
             webhook_max_attempts=_int(os.getenv("VOXORA_WEBHOOK_MAX_ATTEMPTS"), 3),
             webhook_timeout_secs=_float(os.getenv("VOXORA_WEBHOOK_TIMEOUT_SECS"), 10.0),

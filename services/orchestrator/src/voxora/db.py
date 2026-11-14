@@ -37,6 +37,7 @@ JSON_COLUMNS = {
     "session_metadata",
     "transcript",
     "voice_boost",
+    "processing_history",
 }
 
 MODEL_PROFILE_TASKS = ("turn", "analyze")
@@ -409,6 +410,28 @@ CREATE TABLE IF NOT EXISTS voice_boost_settings (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS audio_assets (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    script TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    voice TEXT NOT NULL,
+    language TEXT,
+    speed REAL NOT NULL DEFAULT 1.0,
+    format TEXT NOT NULL,
+    duration_seconds REAL,
+    file_size INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    storage_path TEXT NOT NULL,
+    parent_asset_id TEXT,
+    processing_history TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audio_assets_tenant ON audio_assets(tenant_id, created_at);
+
 CREATE TABLE IF NOT EXISTS ai_usage (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
@@ -657,6 +680,120 @@ class Database:
         stored = self.get_voice_boost_settings(tenant_id)
         assert stored is not None
         return stored
+
+    # ------------------------------------------------------------ audio assets
+    def create_audio_asset(self, tenant_id: str, values: Dict[str, Any]) -> Dict[str, Any]:
+        now = iso()
+        asset_id = values.get("id") or new_id("aud")
+        with self._write() as connection:
+            connection.execute(
+                "INSERT INTO audio_assets"
+                " (id, tenant_id, title, script, provider, model, voice, language,"
+                "  speed, format, duration_seconds, file_size, status, storage_path,"
+                "  parent_asset_id, processing_history, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    asset_id,
+                    tenant_id,
+                    values["title"],
+                    values["script"],
+                    values["provider"],
+                    values["model"],
+                    values["voice"],
+                    values.get("language"),
+                    values.get("speed", 1.0),
+                    values["format"],
+                    values.get("duration_seconds"),
+                    values["file_size"],
+                    values.get("status", "ready"),
+                    values["storage_path"],
+                    values.get("parent_asset_id"),
+                    json.dumps(values.get("processing_history", [])),
+                    now,
+                    now,
+                ),
+            )
+        asset = self.get_audio_asset(tenant_id, asset_id)
+        assert asset is not None
+        return asset
+
+    def get_audio_asset(self, tenant_id: str, asset_id: str) -> Optional[Dict[str, Any]]:
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT * FROM audio_assets WHERE tenant_id=? AND id=?",
+                (tenant_id, asset_id),
+            ).fetchone()
+        return self._decode(row) if row else None
+
+    def list_audio_assets(
+        self,
+        tenant_id: str,
+        limit: int = 50,
+        offset: int = 0,
+        search: Optional[str] = None,
+        status: Optional[str] = None,
+        provider: Optional[str] = None,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        clauses = ["tenant_id=?"]
+        params: List[Any] = [tenant_id]
+        if search:
+            clauses.append("LOWER(title) LIKE LOWER(?)")
+            params.append(f"%{search}%")
+        if status:
+            clauses.append("status=?")
+            params.append(status)
+        if provider:
+            clauses.append("provider=?")
+            params.append(provider)
+        where = " WHERE " + " AND ".join(clauses)
+        with self._read() as connection:
+            total = connection.execute(
+                f"SELECT COUNT(*) AS n FROM audio_assets{where}", params
+            ).fetchone()
+            count = total["n"]
+            rows = connection.execute(
+                f"SELECT * FROM audio_assets{where} ORDER BY created_at DESC, id LIMIT ? OFFSET ?",  # noqa: S608 - internal clause from fixed fragments
+                [*params, limit, offset],
+            ).fetchall()
+        items = [self._decode(row) for row in rows]
+        return items, int(count)
+
+    def update_audio_asset(
+        self, tenant_id: str, asset_id: str, **fields: Any
+    ) -> Optional[Dict[str, Any]]:
+        allowed = {"title", "status", "duration_seconds", "file_size", "processing_history"}
+        updates = [(key, value) for key, value in fields.items() if key in allowed]
+        if not updates:
+            return self.get_audio_asset(tenant_id, asset_id)
+        setters = ", ".join(f"{key}=?" for key, _ in updates)
+        params: List[Any] = []
+        for key, value in updates:
+            params.append(
+                json.dumps(value) if key == "processing_history" else value
+            )
+        params += [iso(), tenant_id, asset_id]
+        with self._write() as connection:
+            connection.execute(
+                f"UPDATE audio_assets SET {setters}, updated_at=? WHERE tenant_id=? AND id=?",  # noqa: S608 - setters from hardcoded allowlist
+                params,
+            )
+        return self.get_audio_asset(tenant_id, asset_id)
+
+    def delete_audio_asset(self, tenant_id: str, asset_id: str) -> bool:
+        with self._write() as connection:
+            cursor = connection.execute(
+                "DELETE FROM audio_assets WHERE tenant_id=? AND id=?",
+                (tenant_id, asset_id),
+            )
+        return cursor.rowcount == 1
+
+    def count_audio_assets_by_status(self, tenant_id: str) -> Dict[str, int]:
+        with self._read() as connection:
+            rows = connection.execute(
+                "SELECT status, COUNT(*) AS n FROM audio_assets WHERE tenant_id=? GROUP BY status",
+                (tenant_id,),
+            ).fetchall()
+        return {row["status"]: int(row["n"]) for row in rows}
 
     # --------------------------------------------------------------- ai usage
     def record_ai_usage(
