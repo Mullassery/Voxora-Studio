@@ -294,3 +294,48 @@ Verified this session: `test_tts_generation.py` (11) + `test_audio_assets.py`
 ruff clean, mypy clean apart from the pre-existing pyreverseetl
 import-untyped note. Remaining Phase C-G (variants/post-processing, script
 chunking + long-form, batch/background jobs) are planned, not claimed.
+
+## M10 Audio Generation, Phase C — non-destructive variants (2026-11-13, verified this session)
+
+The PRODUCE-half finishing pass: operators derive optional variants from a
+generated WAV asset, reusing the M9 DSP so ONE engine serves both directions
+of the pipeline (calls enhanced on the way in, assets enhanced on the way out).
+
+- **Real resampler (new Rust DSP)**: `crates/voice-runtime/src/resample.rs` —
+  whole-buffer Hann-windowed sinc, arbitrary ratios (8k–48k), cutoff
+  0.45×min(in,out), single DC-gain norm on the input grid. Verified by
+  sine-sweep tests (amplitude ±2%, zero-crossing frequency within 2%,
+  ratio frame counts). Two kernel bugs were caught BY the tests (per-position
+  renormalization exploded 870×; an inverted window zeroed the main lobe) —
+  the RED→GREEN loop earned its keep.
+- **Offline post-process seam**: `postprocess.rs` + pyfunction
+  `audio_postprocess(samples, ops_json, rate)` — normalize (pure gain,
+  clip-guarded: gain REDUCED rather than clipping, `target_reached` honest;
+  within the API's ≤ -6 dBFS target range clipping is mathematically
+  impossible and the test pins that) and voice_boost (the SAME
+  `VoiceBoostStage` M9 uses, with the documented 16 kHz internal round-trip
+  for non-16k assets — duration preserved ±1%, recorded in diagnostics).
+  9 new Rust tests; 131 total green; `cargo check --features pyo3-bindings`
+  compiles; seam verified through the REAL wheel (`make py-voice`).
+- **Variant engine** (`variants.py`): WAV I/O via stdlib `wave` (16-bit
+  mono/stereo only — honest 422 for compressed/non-16-bit parents, never
+  misread bytes); trim_silence (amplitude-threshold scan, everything-quiet →
+  422) and channel conversion (mean-mix with clip guard) in Python; variants
+  written as full WAV containers; variant-of-variant chains allowed with
+  accumulating `processing_history` (op, params, diagnostics, at, by).
+- **API**: `POST /api/v1/audio-assets/{id}/variants` (writer-gated, 201,
+  audited `audio.variant_created`; 1–6 ops, extra=forbid, voice_boost+stereo
+  combo refused 422; ValueError→422 `variant_invalid`, RuntimeError→503
+  `audio_engine_unavailable` — the extension is REQUIRED, never faked),
+  `GET .../variants` (`_page` shape). The parent file is only ever READ —
+  byte-identity pinned by test at both the engine and HTTP layer.
+- Honest boundaries: WAV-16-bit parents only this phase; no compressed decode;
+  voice_boost mono-only (stereo → 422); variant voice_boost resolves the op's
+  own params over the builtin profile (tenant stored settings never consulted
+  — a stored `enabled: false` silently no-opping an explicit op would be a
+  fake success); op-params ride the M9 override validation (ranges refused,
+  never clamped).
+
+Verified this session: orchestrator suite 392 green (SQLite + Postgres),
+ruff clean, mypy clean (repo config), cargo 131 green. Phase D (long-form
+chunking) and Phase E (batch/background) remain planned, not claimed.
