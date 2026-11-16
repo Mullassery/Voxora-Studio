@@ -142,6 +142,25 @@ mod _py {
         Ok(serde_json::to_string(&config).expect("voice boost config serializes"))
     }
 
+    /// Offline asset post-processing seam (M10 Phase C): i16 samples + ops
+    /// envelope JSON in, enhanced samples + diagnostics JSON out. Python
+    /// (`voxora.variants`) owns WAV I/O and the trim/channels ops; unknown
+    /// or invalid ops surface as `ValueError` (the orchestrator maps to 422).
+    #[pyfunction]
+    #[pyo3(signature = (samples, ops_json, rate))]
+    fn audio_postprocess(
+        samples: Vec<i16>,
+        ops_json: &str,
+        rate: u32,
+    ) -> PyResult<(Vec<i16>, String)> {
+        let (out, diagnostics) = crate::postprocess::audio_postprocess_impl(&samples, rate, ops_json)
+            .map_err(PyValueError::new_err)?;
+        Ok((
+            out,
+            serde_json::to_string(&diagnostics).expect("postprocess diagnostics serialize"),
+        ))
+    }
+
     /* ---------------------- turn detection engine ---------------------- */
 
     /// Live turn-detection seam: one Rust `TurnDetectionController` per
@@ -356,6 +375,7 @@ mod _py {
     fn voxora_voice_runtime(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(run_scripted_call_json, m)?)?;
         m.add_function(wrap_pyfunction!(voice_boost_config_from_json, m)?)?;
+        m.add_function(wrap_pyfunction!(audio_postprocess, m)?)?;
         m.add_class::<TurnDetectionEngine>()?;
         m.add("__version__", env!("CARGO_PKG_VERSION"))?;
         Ok(())

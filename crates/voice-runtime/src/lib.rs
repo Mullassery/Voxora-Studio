@@ -22,3 +22,4 @@ pub mod wav;
 #[cfg(feature = "pyo3-bindings")]
 pub mod pybridge;
 pub mod resample;
+pub mod postprocess;
