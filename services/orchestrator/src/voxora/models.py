@@ -154,6 +154,44 @@ class AudioAssetGenerate(BaseModel):
         return self
 
 
+class VariantOp(BaseModel):
+    """One non-destructive variant operation (roadmap M10 Phase C).
+
+    Ranges per the design doc; unknown keys refused (extra=forbid). The
+    `voice_boost` op is op-ONLY resolution — its params ride the builtin
+    profile config; tenant stored settings are never consulted.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    type: Literal["normalize", "trim_silence", "resample", "channels", "voice_boost"]
+    target_dbfs: Optional[float] = Field(default=None, ge=-24.0, le=-6.0)
+    threshold_dbfs: Optional[float] = Field(default=None, ge=-60.0, le=-20.0)
+    min_silence_ms: Optional[int] = Field(default=None, ge=0, le=2000)
+    sample_rate: Optional[int] = Field(default=None, ge=8000, le=48000)
+    to: Optional[Literal["mono", "stereo"]] = None
+    profile: Optional[Literal["natural", "clear", "studio"]] = None
+    overrides: Optional[VoiceBoostControlOverrides] = None
+
+
+class VariantOpsRequest(BaseModel):
+    """Envelope for `POST /audio-assets/{id}/variants`: 1-6 ops in order."""
+
+    model_config = {"extra": "forbid"}
+
+    ops: List[VariantOp] = Field(min_length=1, max_length=6)
+
+    @model_validator(mode="after")
+    def _voice_boost_is_mono_only(self) -> "VariantOpsRequest":
+        has_boost = any(op.type == "voice_boost" for op in self.ops)
+        makes_stereo = any(op.type == "channels" and op.to == "stereo" for op in self.ops)
+        if has_boost and makes_stereo:
+            raise ValueError(
+                "voice_boost is mono-only; a channels->stereo op cannot combine with it"
+            )
+        return self
+
+
 class VoiceSessionCreate(BaseModel):
     """Voice-session intake per the ecosystem ADR (ADR-3B).
 

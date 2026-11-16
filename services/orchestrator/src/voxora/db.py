@@ -779,6 +779,17 @@ class Database:
             )
         return self.get_audio_asset(tenant_id, asset_id)
 
+    def list_audio_asset_variants(
+        self, tenant_id: str, parent_asset_id: str
+    ) -> List[Dict[str, Any]]:
+        with self._read() as connection:
+            rows = connection.execute(
+                "SELECT * FROM audio_assets"
+                " WHERE tenant_id=? AND parent_asset_id=? ORDER BY created_at ASC",
+                (tenant_id, parent_asset_id),
+            ).fetchall()
+        return [self._decode(row) for row in rows]
+
     def delete_audio_asset(self, tenant_id: str, asset_id: str) -> bool:
         with self._write() as connection:
             cursor = connection.execute(

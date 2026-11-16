@@ -45,6 +45,7 @@ from .models import (
     TurnProviderFailure,
     TurnSemanticReport,
     TurnTranscript,
+    VariantOpsRequest,
     VoiceBoostSettingsUpdate,
     VoiceSessionCreate,
 )
@@ -1319,6 +1320,54 @@ def create_app(
             {"title": asset["title"]},
         )
         return {"deleted": True, "id": asset_id}
+
+    @app.post("/api/v1/audio-assets/{asset_id}/variants", status_code=201)
+    def create_audio_variant(
+        asset_id: str,
+        payload: VariantOpsRequest,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        """Derive a non-destructive variant (M10 Phase C).
+
+        ValueError from the engine → 422 `variant_invalid`; RuntimeError
+        (engine unavailable) → 503 `audio_engine_unavailable`. The parent is
+        only ever read.
+        """
+        _require_writer(principal)
+        parent = app.state.db.get_audio_asset(principal.tenant_id, asset_id)
+        if parent is None:
+            raise ApiError(404, "audio asset not found", "not_found")
+        from .variants import create_variant
+
+        ops = [op.model_dump(exclude_none=True) for op in payload.ops]
+        try:
+            variant = create_variant(
+                app.state.db,
+                app.state.settings,
+                principal.tenant_id,
+                principal.name,
+                parent,
+                ops,
+            )
+        except ValueError as error:
+            raise ApiError(422, str(error), "variant_invalid") from None
+        except RuntimeError as error:
+            raise ApiError(503, str(error), "audio_engine_unavailable") from None
+        return variant
+
+    @app.get("/api/v1/audio-assets/{asset_id}/variants")
+    def list_audio_variants(
+        asset_id: str,
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        if app.state.db.get_audio_asset(principal.tenant_id, asset_id) is None:
+            raise ApiError(404, "audio asset not found", "not_found")
+        items = app.state.db.list_audio_asset_variants(principal.tenant_id, asset_id)
+        total = len(items)
+        window = items[offset : offset + limit]
+        return _page(window, total, limit, offset)
 
     @app.get("/api/v1/audio/providers")
     def audio_provider_status(
