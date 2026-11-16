@@ -96,7 +96,13 @@ def _i16_to_frames(samples: List[int]) -> bytes:
 def _trim_silence(
     samples: List[int], rate: int, threshold_dbfs: float, min_silence_ms: int
 ) -> Tuple[List[int], Dict[str, Any]]:
-    """Amplitude-threshold head/tail trim (pure slicing, content untouched)."""
+    """Amplitude-threshold head/tail trim (pure slicing, content untouched).
+
+    `min_silence_ms` is the minimum quiet span an edge must have before it is
+    trimmed (tiny breaths survive). Refusal is honest: only when NOTHING is
+    kept (the whole asset is below the threshold) — never for short loud
+    clips, which pass through untouched.
+    """
     threshold = 32768.0 * (10.0 ** (threshold_dbfs / 20.0))
     min_silence = int(rate * min_silence_ms / 1000)
     quiet = [abs(s) < threshold for s in samples]
@@ -106,7 +112,11 @@ def _trim_silence(
     tail = len(quiet)
     while tail > head and quiet[tail - 1]:
         tail -= 1
-    if len(samples) - (head + (len(samples) - tail)) < min_silence:
+    if head < min_silence:
+        head = 0
+    if len(quiet) - tail < min_silence:
+        tail = len(quiet)
+    if tail <= head:
         raise ValueError(
             "trim_silence would remove the entire asset (everything is below the threshold)"
         )
@@ -114,6 +124,7 @@ def _trim_silence(
     return trimmed, {
         "op": "trim_silence",
         "threshold_dbfs": threshold_dbfs,
+        "min_silence_ms": min_silence_ms,
         "trimmed_head": head,
         "trimmed_tail": len(samples) - tail,
     }
@@ -143,19 +154,24 @@ def _convert_channels(
 
 
 _PY_OPS = {"trim_silence", "channels"}
-_RUST_OPS = {"normalize", "voice_boost"}
+_RUST_OPS = {"normalize", "resample", "voice_boost"}
 
 
 def _apply_rust_op(
     extension: Any, samples: List[int], rate: int, op: Dict[str, Any]
-) -> Tuple[List[int], Dict[str, Any]]:
+) -> Tuple[List[int], Dict[str, Any], int]:
     """One extension call per Rust op so listed-order semantics hold across
-    the Python/Rust boundary."""
+    the Python/Rust boundary. Returns (samples, record, resulting_rate)."""
     kind = op["type"]
     if kind == "normalize":
         rust_op: Dict[str, Any] = {
             "type": "normalize",
             "target_dbfs": float(op.get("target_dbfs", -16.0)),
+        }
+    elif kind == "resample":
+        rust_op = {
+            "type": "resample",
+            "sample_rate": int(op["sample_rate"]),
         }
     else:
         overrides = op.get("overrides") or {}
@@ -169,8 +185,11 @@ def _apply_rust_op(
     out_samples, diagnostics_json = extension.audio_postprocess(samples, ops_json, rate)
     diagnostics = json.loads(diagnostics_json)
     record = dict(diagnostics)
+    per_op = diagnostics.get("ops") or [{}]
+    record.update(per_op[0])
     record["op"] = kind
-    return list(out_samples), record
+    out_rate = int(diagnostics.get("final_rate", rate))
+    return list(out_samples), record, out_rate
 
 
 def _voice_boost_settings_json(profile: str, overrides: Dict[str, Any]) -> str:
@@ -201,11 +220,6 @@ def create_variant(
     samples = _frames_to_i16(frames)
     current_rate = rate
     current_channels = channels
-    has_voice_boost = any(op.get("type") == "voice_boost" for op in ops)
-    if has_voice_boost and current_channels == 2:
-        raise ValueError(
-            "voice_boost is mono-only (the Rust chain is mono); convert to mono first"
-        )
     history: List[Dict[str, Any]] = list(parent.get("processing_history") or [])
     extension: Optional[Any] = None
     if any(op.get("type") in _RUST_OPS for op in ops):
@@ -228,7 +242,14 @@ def create_variant(
                 samples, current_channels, str(op.get("to", "mono"))
             )
         elif kind in _RUST_OPS:
-            samples, record = _apply_rust_op(extension, samples, current_rate, op)
+            if kind == "voice_boost" and current_channels == 2:
+                raise ValueError(
+                    "voice_boost is mono-only (the Rust chain is mono);"
+                    " convert to mono before boosting"
+                )
+            samples, record, current_rate = _apply_rust_op(
+                extension, samples, current_rate, op
+            )
             record["params"] = params
         else:
             raise ValueError(f"unsupported variant op: {kind!r}")

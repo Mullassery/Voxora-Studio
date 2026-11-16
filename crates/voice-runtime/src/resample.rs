@@ -20,8 +20,11 @@ fn sinc(x: f64) -> f64 {
     }
 }
 
-/// Taps per zero-crossing of the sinc (zero-stuffing density)./// Half-width of the kernel in zero-crossings (sinc lobes kept each side).
-const KERNEL_HALF_WIDTH_ZC: f64 = 4.0;
+/// Half-width of the kernel in zero-crossings (sinc lobes kept each side).
+/// 16 lobes: keeps the 5–8 kHz sibilance/clarity band intact through the
+/// 24k→16k flagship path (a 4-lobe kernel attenuated 6 kHz by −1.9 dB and
+/// 8 kHz by −10.8 dB — found in whole-branch review, fixed).
+const KERNEL_HALF_WIDTH_ZC: f64 = 16.0;
 
 /// Kernel value at input-sample offset `dist` (in input samples) for the
 /// given beta (= 2·cutoff/in_rate, i.e. zero-spacing = 1/β input samples).
@@ -169,6 +172,20 @@ mod tests {
         assert!(
             (zc as f64 - expected_zc as f64).abs() <= 0.02 * expected_zc as f64,
             "zero crossings {zc} vs expected {expected_zc}"
+        );
+    }
+
+    #[test]
+    fn midband_tone_survives_flagship_24k_to_16k_within_half_db() {
+        // The flagship OpenAI path: a 6 kHz tone must pass within ±0.5 dB
+        // (a 4-lobe kernel attenuated it by -1.9 dB; found in review).
+        let input = sine(24000, 1.0, 6000.0, 0.5);
+        let out = resample_f32(&input, 24000, 16000);
+        let p = peak(&out);
+        let delta_db = 20.0 * (p as f64 / 0.5).log10();
+        assert!(
+            delta_db.abs() <= 0.5,
+            "6 kHz attenuation {delta_db:.2} dB exceeds ±0.5 dB"
         );
     }
 

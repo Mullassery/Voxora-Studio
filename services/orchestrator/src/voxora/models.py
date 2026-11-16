@@ -182,13 +182,16 @@ class VariantOpsRequest(BaseModel):
     ops: List[VariantOp] = Field(min_length=1, max_length=6)
 
     @model_validator(mode="after")
-    def _voice_boost_is_mono_only(self) -> "VariantOpsRequest":
+    def _cross_op_rules(self) -> "VariantOpsRequest":
         has_boost = any(op.type == "voice_boost" for op in self.ops)
         makes_stereo = any(op.type == "channels" and op.to == "stereo" for op in self.ops)
         if has_boost and makes_stereo:
             raise ValueError(
                 "voice_boost is mono-only; a channels->stereo op cannot combine with it"
             )
+        for op in self.ops:
+            if op.type == "resample" and op.sample_rate is None:
+                raise ValueError("resample requires sample_rate (8000-48000)")
         return self
 
 

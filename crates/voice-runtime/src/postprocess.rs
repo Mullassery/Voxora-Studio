@@ -159,6 +159,7 @@ pub fn audio_postprocess_impl(
         .and_then(|v| v.as_array())
         .ok_or("ops envelope missing an ops array")?;
     let mut current = samples.to_vec();
+    let mut current_rate = rate;
     let mut records: Vec<Value> = Vec::new();
     let mut roundtrip_any = false;
     for op in ops {
@@ -177,12 +178,32 @@ pub fn audio_postprocess_impl(
                 current = next;
                 records.push(record);
             }
+            "resample" => {
+                let target = op
+                    .get("sample_rate")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32)
+                    .ok_or("resample op missing sample_rate")?;
+                if target == 0 {
+                    return Err("invalid sample_rate: 0".to_string());
+                }
+                if target != current_rate {
+                    current = resample_i16(&current, current_rate, target);
+                }
+                let record = serde_json::json!({
+                    "op": "resample",
+                    "in_rate": current_rate,
+                    "out_rate": target,
+                });
+                current_rate = target;
+                records.push(record);
+            }
             "voice_boost" => {
                 let settings_json = op
                     .get("settings_json")
                     .and_then(|v| v.as_str())
                     .ok_or("voice_boost op missing settings_json")?;
-                let (next, record) = voice_boost_op(&current, rate, settings_json)?;
+                let (next, record) = voice_boost_op(&current, current_rate, settings_json)?;
                 current = next;
                 if record
                     .get("internal_rate_roundtrip")
@@ -209,6 +230,7 @@ pub fn audio_postprocess_impl(
             "ops": records,
             "clipped_after": clipped_after,
             "internal_rate_roundtrip": roundtrip_any,
+            "final_rate": current_rate,
         }),
     ))
 }
@@ -364,6 +386,42 @@ mod tests {
             .expect("chained ops should succeed");
         assert_eq!(diag["ops"].as_array().unwrap().len(), 2);
         assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn resample_op_changes_frame_count_and_tracks_rate_for_later_ops() {
+        let input = sine_i16(24000, 1.0, 440.0, 0.3);
+        let ops = serde_json::json!([
+            { "type": "resample", "sample_rate": 16000 },
+            {
+                "type": "voice_boost",
+                "settings_json": r#"{"enabled": true, "profile": "natural", "overrides": {}}"#,
+            },
+        ]);
+        let (out, diag) = audio_postprocess_impl(&input, 24000, &envelope(24000, ops))
+            .expect("resample + voice_boost should succeed");
+        let resample_record = &diag["ops"][0];
+        assert_eq!(resample_record["op"], serde_json::json!("resample"));
+        assert_eq!(resample_record["in_rate"], serde_json::json!(24000));
+        assert_eq!(resample_record["out_rate"], serde_json::json!(16000));
+        // The boost ran at the NEW rate: no internal round-trip needed.
+        let boost_record = &diag["ops"][1];
+        assert_eq!(
+            boost_record["internal_rate_roundtrip"],
+            serde_json::json!(false)
+        );
+        assert_eq!(boost_record["asset_rate"], serde_json::json!(16000));
+        assert!((out.len() as i64 - 16000).abs() <= 16, "out len {}", out.len());
+    }
+
+    #[test]
+    fn resample_requires_target_rate() {
+        let result = audio_postprocess_impl(
+            &sine_i16(16000, 0.1, 440.0, 0.3),
+            16000,
+            &envelope(16000, serde_json::json!([{ "type": "resample" }])),
+        );
+        assert!(result.err().unwrap().contains("sample_rate"));
     }
 
     #[test]

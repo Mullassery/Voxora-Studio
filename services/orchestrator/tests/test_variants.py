@@ -140,6 +140,19 @@ def test_trim_that_removes_everything_is_refused(
         )
 
 
+def test_short_clip_with_no_quiet_is_not_falsely_refused(
+    database: Database, settings: Settings
+) -> None:
+    """A sub-min_silence loud clip must pass through untouched — the refusal
+    message "everything is below the threshold" must never lie."""
+    parent = _make_parent(database, settings, _sine_blob(seconds=0.1, amp=0.3))
+    variant = create_variant(
+        database, settings, TENANT, "Admin", parent, [{"type": "trim_silence"}]
+    )
+    assert variant["status"] == "ready"
+    assert variant["file_size"] == parent["file_size"]
+
+
 def test_mono_to_stereo_doubles_frames(database: Database, settings: Settings) -> None:
     parent = _make_parent(database, settings, _sine_blob(seconds=0.5))
     variant = create_variant(
@@ -251,6 +264,53 @@ def test_voice_boost_on_stereo_parent_refused(
         create_variant(
             database, settings, TENANT, "Admin", parent, [{"type": "voice_boost"}]
         )
+
+
+def test_stereo_convert_to_mono_then_boost_succeeds(
+    database: Database, settings: Settings
+) -> None:
+    """Spec call 3 sanctions convert-then-boost in one request: the mono check
+    applies when the boost EXECUTES, not against the parent's channels."""
+    parent = _make_parent(database, settings, _sine_blob(seconds=0.5, channels=2))
+    variant = create_variant(
+        database,
+        settings,
+        TENANT,
+        "Admin",
+        parent,
+        [
+            {"type": "channels", "to": "mono"},
+            {"type": "voice_boost", "profile": "clear", "overrides": {}},
+        ],
+    )
+    assert variant["status"] == "ready"
+    assert [entry["op"] for entry in variant["processing_history"]] == [
+        "channels",
+        "voice_boost",
+    ]
+
+
+@needs_extension
+def test_resample_op_changes_rate_and_later_ops_track_it(
+    database: Database, settings: Settings
+) -> None:
+    parent = _make_parent(database, settings, _sine_blob(seconds=1.0))
+    variant = create_variant(
+        database,
+        settings,
+        TENANT,
+        "Admin",
+        parent,
+        [{"type": "resample", "sample_rate": 16000}],
+    )
+    with wave.open(
+        io.BytesIO(Path(settings.audio_storage_path, variant["storage_path"]).read_bytes())
+    ) as reader:
+        assert reader.getframerate() == 16000
+        assert abs(reader.getnframes() - 16000) <= 16
+    record = variant["processing_history"][-1]
+    assert record["diagnostics"]["in_rate"] == 24000
+    assert record["diagnostics"]["out_rate"] == 16000
 
 
 # ------------------------------------------------------- flow + non-destructive
