@@ -310,7 +310,7 @@ post-processing → tests → docs); each phase ends testable.
   duration, size, status, storage location, processing history). Local file
   store with path-traversal-safe names, size/duration limits, and
   download authorization. Preview, download, rename, delete, search/filter.
-- [ ] **Phase C — Formats + optional non-destructive post-processing.**
+- [x] **Phase C — Formats + optional non-destructive post-processing.**
   Provider-native formats pass through untouched; conversion is performed only
   where actually implementable in-repo (WAV/PCM, sample-rate and mono/stereo
   via the stdlib — the no-ffmpeg ruling stands unless a deployment need
