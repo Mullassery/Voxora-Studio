@@ -386,6 +386,28 @@ regeneration):
   input can exceed the 50 MB assembled cap → terminal `failed` with the
   remedy in the message.
 
-Verified this session: orchestrator + ai-runtime suite 435 green (SQLite +
+Verified this session: orchestrator + ai-runtime suite 441 green (SQLite +
 Postgres), ruff clean, mypy clean (repo config). Phase E (batch/background),
 Phase F (console UI), Phase G remain planned, not claimed.
+
+Phase D whole-branch review (fresh reviewer, base 5481a44 → 28013a5) — fixed
+in commit 28013a5: (1) assembly catch broadened to
+`ValueError/wave.Error/EOFError/OSError` in BOTH run paths — a corrupt or
+missing chunk file now lands in terminal `failed` with a sanitized message
+instead of a 500 + permanently-stuck `processing` row; (2) run-lock
+check+add made atomic under a `threading.Lock` with a dedicated
+`RunInFlightError` (FastAPI threadpool could double-run retries on a bare
+membership test); lock is acquired inside `_check_runnable` before any
+other work and released on every path; (3) unconfigured provider now maps
+501 `audio_provider_unconfigured` on BOTH long-form routes (provider built
+at the API edge, matching the single-request route); dead
+`AudioGenerationError` catches removed. Also added: provider format-mismatch
+guard (a provider echoing a different format than requested honestly fails
+that chunk), softened chunker docstring (verbatim guarantee is
+paragraph-merge level; retry stability rests on stored texts, not source
+reconstruction). Deferred minors (not fixed, accepted): per-chunk manifest
+rewrites the full history JSON each chunk (bounded, Phase E should move to
+the worker with a DB-level claim); download of a `failed` asset is 404
+`file_missing` (spec pinned only `processing`); retry test asserts provider
+call-count rather than byte-identity (deliberately — stronger and
+implementation-agnostic).
