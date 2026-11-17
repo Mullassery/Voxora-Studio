@@ -286,6 +286,12 @@ one). Phased delivery per the implementation spec (repo inspection → TTS
 abstraction → generation API → assets → console UI → long-form → batch →
 post-processing → tests → docs); each phase ends testable.
 
+**Status: Phases A–D shipped and review-clean (2026-11-13) — provider
+abstraction, generation API + asset library, non-destructive variants,
+long-form chunking/assembly/retry. Pending: Phase E (CSV batch generation
+with background worker processing), Phase F (console Audio Generation
+section), Phase G (tests + docs sweep).**
+
 - [x] **Phase A — TTS provider abstraction + first provider.**
   Provider-independent interface (`TTSProvider`) behind the orchestrator's
   config conventions (env-seeded config-in-db, credentials never in source or
