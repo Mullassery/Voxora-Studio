@@ -339,3 +339,53 @@ of the pipeline (calls enhanced on the way in, assets enhanced on the way out).
 Verified this session: orchestrator suite 392 green (SQLite + Postgres),
 ruff clean, mypy clean (repo config), cargo 131 green. Phase D (long-form
 chunking) and Phase E (batch/background) remain planned, not claimed.
+
+## M10 Audio Generation, Phase D — long-form generation (2026-11-13, verified this session)
+
+What shipped (long-form: scripts far beyond the provider's 4096-char limit
+become ONE assembled asset, with per-chunk honesty and retry-without-
+regeneration):
+- **Chunker** (`longform.py`): paragraph-boundary chunking (blank lines),
+  sentence-boundary fallback for paragraphs over the limit, word-boundary
+  hard split as documented last resort; greedy merge up to `max_chunk_chars`
+  (default 4096, range 500-4096); 64-chunk cap (422 with the actual count);
+  chunk texts concatenate back to the script verbatim (pinned by test).
+- **Run engine** (`longform.py`): `generate_long_form` creates the row
+  immediately (`status: processing`, real final storage_path, file_size 0,
+  duration None), then generates each chunk through the EXISTING provider
+  abstraction with ONE settings set — chunk intermediates are files
+  (`{asset_id}_chunk_{i}.{ext}`), never asset rows (kept out of the operator
+  library by design). Manifest lives in `processing_history`: header entry
+  (`kind: longform`, run_id, FULL settings snapshot incl. `instructions`,
+  max_chunk_chars) + per-chunk entries (text verbatim, state, sanitized
+  error) + `assembled`/`assembly_failed` entries. Assembly: WAV concat is
+  frame-exact with rate/channels equality enforced, PCM raw concat with
+  honest duration None; assembled blob validated (50 MB cap) and frame count
+  asserted == sum of chunk frames; chunk files removed after successful
+  assembly. Any chunk failure → row stays `processing` (succeeded chunks
+  kept); assembly failure → terminal `failed` with a message naming the
+  remedy (shorter script). In-process `run_locks` guard double-runs.
+- **Retry** (`retry_long_form` + `POST /api/v1/audio-assets/{id}/retry-
+  failed`): validates long-form header + status + lock (409 `run_in_flight`,
+  non-long-form/terminal → 409 `longform_invalid`), regenerates ONLY
+  failed/missing chunks from the STORED snapshot (retry uses byte-identical
+  chunk text and identical settings — pinned by tests: exactly one extra
+  provider call, boundaries unchanged), then re-assembles.
+- **API**: `POST /api/v1/audio-assets/generate-long` (writer-gated, 201 even
+  on partial failure — the body carries `processing` status and the failed
+  chunk; script ≤ 262 144 chars; ValueError→422 `longform_invalid`),
+  lifecycle guards: download of a `processing` asset → 409
+  `still_processing` (never a misleading 404), variant of a non-`ready`
+  asset → 422; DELETE removes the assembled file AND all chunk files.
+  Audited `audio.longform_completed`.
+- Honest boundaries: synchronous request bounded by the 64-chunk cap (long
+  scripts are long requests — Phase E adds background processing);
+  WAV/PCM assembly only (no in-repo decoder for compressed formats, same
+  ruling as variants); run lock is per-process (single-worker deployment —
+  multi-worker would need a shared lease, documented not hidden); max legal
+  input can exceed the 50 MB assembled cap → terminal `failed` with the
+  remedy in the message.
+
+Verified this session: orchestrator + ai-runtime suite 435 green (SQLite +
+Postgres), ruff clean, mypy clean (repo config). Phase E (batch/background),
+Phase F (console UI), Phase G remain planned, not claimed.

@@ -323,7 +323,7 @@ post-processing → tests → docs); each phase ends testable.
   the pipeline, and generated assets may optionally be enhanced with a Voice
   Boost profile (NATURAL/CLEAR/STUDIO) through the same settings-resolution
   surface built for calls, never destructively.
-- [ ] **Phase D — Long-form generation.** Paragraph-preserving chunking,
+- [x] **Phase D — Long-form generation.** Paragraph-preserving chunking,
   ordered sequential assembly, consistent voice settings across chunks,
   per-chunk failure tracking with retry-without-regeneration, assembled-file
   validation.
