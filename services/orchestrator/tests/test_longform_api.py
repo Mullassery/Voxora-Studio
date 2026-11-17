@@ -55,8 +55,10 @@ class APIFailOnceProvider(MockTTSProvider):
 
 def _generate_long(client: TestClient, provider: Any = None, **overrides: Any):
     if provider is not None:
-        original = longform_module.build_tts_provider
-        longform_module.build_tts_provider = lambda settings: provider  # type: ignore[assignment]
+        import voxora.api as api_module
+
+        original = api_module.build_tts_provider
+        api_module.build_tts_provider = lambda settings: provider  # type: ignore[assignment]
         try:
             return client.post(
                 "/api/v1/audio-assets/generate-long", json=_fail_payload(**overrides), headers=AUTH
@@ -173,3 +175,21 @@ def test_viewer_cannot_generate_long_or_retry(client: TestClient) -> None:
     assert response.status_code == 403
     retry = client.post("/api/v1/audio-assets/aud_x/retry-failed", headers=VIEWER_AUTH)
     assert retry.status_code == 403
+
+
+def test_generate_long_unconfigured_provider_is_501(client: TestClient) -> None:
+    import voxora.api as api_module
+
+    def _unconfigured(settings: Any):
+        raise ValueError("OPENAI_API_KEY is not configured; audio generation is unconfigured")
+
+    original = api_module.build_tts_provider
+    api_module.build_tts_provider = _unconfigured  # type: ignore[assignment]
+    try:
+        response = client.post(
+            "/api/v1/audio-assets/generate-long", json=_fail_payload(), headers=AUTH
+        )
+    finally:
+        api_module.build_tts_provider = original
+    assert response.status_code == 501
+    assert response.json()["error"]["code"] == "audio_provider_unconfigured"

@@ -5,9 +5,11 @@ import wave as wave_mod
 
 import pytest
 
+import voxora.longform as longform_mod
 from voxora.config import Settings
 from voxora.longform import (
     MAX_CHUNKS,
+    RunInFlightError,
     chunk_script,
     generate_long_form,
     retry_long_form,
@@ -246,3 +248,42 @@ def test_no_row_left_when_validation_fails_before_creation(actor_db, tmp_path):
         generate_long_form(db, _settings(tmp_path), TENANT, "admin@a.b", _payload(voice=""), provider=MockTTSProvider())
     items, _ = db.list_audio_assets(TENANT, limit=10, offset=0)
     assert items == []
+
+
+# --- review fixes -------------------------------------------------------
+
+
+
+def test_double_acquire_raises_run_in_flight():
+    longform_mod._acquire_run_lock("aud_test")
+    try:
+        with pytest.raises(RunInFlightError):
+            longform_mod._acquire_run_lock("aud_test")
+    finally:
+        longform_mod._release_run_lock("aud_test")
+
+
+def test_corrupt_chunk_file_fails_assembly_not_500(actor_db, tmp_path):
+    db = actor_db
+    settings = _settings(tmp_path)
+    provider = FailOnceProvider()
+    asset = generate_long_form(db, settings, TENANT, "admin@a.b", _payload(), provider=provider)
+    assert asset["status"] == "processing"
+    # corrupt one of the SUCCEEDED chunks on disk (crash/disk corruption)
+    chunk_files = sorted((tmp_path / "store" / TENANT).glob(f"{asset['id']}_chunk_*"))
+    chunk_files[0].write_bytes(b"not a wav at all")
+    retried = retry_long_form(db, settings, TENANT, "admin@a.b", asset, provider=MockTTSProvider())
+    assert retried["status"] == "failed"
+    failed_entries = [e for e in retried["processing_history"] if e.get("kind") == "assembly_failed"]
+    assert failed_entries
+
+
+def test_provider_format_mismatch_marks_chunk_failed(actor_db, tmp_path):
+    db = actor_db
+    asset = generate_long_form(
+        db, _settings(tmp_path), TENANT, "admin@a.b", _payload(), provider=RawPcmProvider()
+    )
+    # requested wav, provider returned pcm: the chunk is honestly failed
+    assert asset["status"] == "processing"
+    failed = [e for e in _chunk_entries(asset) if e["state"] == "failed"]
+    assert failed and "pcm" in failed[0]["error"]

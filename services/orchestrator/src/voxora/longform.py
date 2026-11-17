@@ -6,6 +6,7 @@ Design: docs/superpowers/specs/2026-11-13-longform-generation-design.md
 import io
 import json
 import re
+import threading
 import wave
 from typing import Any, Dict, List, Optional, Set
 
@@ -34,7 +35,26 @@ LONGFORM_FORMATS = ("wav", "pcm")
 
 # Per-process markers for runs currently executing (Phase D call 1: a
 # `retry-failed` while one of these is held is a 409, never a double-run).
+# `_RUN_GATE` makes check+add atomic — FastAPI runs sync routes in a
+# threadpool even single-worker, so a bare membership test would race.
 run_locks: Set[str] = set()
+_RUN_GATE = threading.Lock()
+
+
+class RunInFlightError(ValueError):
+    """A run for this asset is already executing (API maps to 409)."""
+
+
+def _acquire_run_lock(asset_id: str) -> None:
+    with _RUN_GATE:
+        if asset_id in run_locks:
+            raise RunInFlightError("a long-form run for this asset is in flight")
+        run_locks.add(asset_id)
+
+
+def _release_run_lock(asset_id: str) -> None:
+    with _RUN_GATE:
+        run_locks.discard(asset_id)
 
 _PARA_SPLIT = re.compile(r"\n\s*\n")
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?…])\s+")
@@ -85,9 +105,11 @@ def chunk_script(script: str, max_chunk_chars: int) -> List[str]:
 
     Paragraph boundaries first (blank lines); a paragraph longer than the
     limit is split at sentence boundaries; a single sentence longer than
-    the limit is hard-split at a word boundary. Chunk texts concatenate
-    back to the original script verbatim (whitespace between pieces is
-    preserved at merge boundaries).
+    the limit is hard-split at a word boundary. Paragraph merges preserve
+    the original separators; sentence/hard splits rejoin with single
+    spaces (prosodically equivalent — the retry-stability guarantee is
+    that STORED chunk texts are reused byte-identically, not that texts
+    reconstruct the source byte-for-byte).
     """
     if not script.strip():
         raise ValueError("script is empty")
@@ -174,6 +196,10 @@ def _generate_one_chunk(
 ) -> None:
     """Generate, validate, and persist one chunk file. Raises on failure."""
     result = provider.generate(_chunk_request(text, snapshot))
+    if result.format != snapshot["response_format"]:
+        raise ValueError(
+            f"provider returned {result.format!r} for a {snapshot['response_format']!r} chunk"
+        )
     validate_audio_blob(result.audio, result.format)
     path = _chunk_path(store, tenant_id, asset_id, index, result.format)
     store.save(path, result.audio)
@@ -281,13 +307,15 @@ def _check_runnable(asset: Dict[str, Any]) -> list:
     history = _load_asset_history(asset)
     if not history or history[0].get("kind") != "longform":
         raise ValueError("asset is not a long-form run")
-    asset_id = asset["id"]
-    if asset_id in run_locks:
-        raise ValueError("a long-form run for this asset is in flight")
-    if asset.get("status") not in ("processing", "failed"):
-        raise ValueError(
-            f"long-form retry requires status processing/failed, not {asset.get('status')!r}"
-        )
+    _acquire_run_lock(asset["id"])  # raises RunInFlightError while held
+    try:
+        if asset.get("status") not in ("processing", "failed"):
+            raise ValueError(
+                f"long-form retry requires status processing/failed, not {asset.get('status')!r}"
+            )
+    except BaseException:
+        _release_run_lock(asset["id"])
+        raise
     return history
 
 
@@ -342,7 +370,7 @@ def generate_long_form(
         },
     )
 
-    run_locks.add(asset_id)
+    _acquire_run_lock(asset_id)
     try:
         for index, entry in enumerate(history[1:]):
             try:
@@ -377,12 +405,10 @@ def generate_long_form(
                 {"chunks": len(texts), "provider": provider.id},
             )
             return finished
-        except ValueError as error:
+        except (ValueError, wave.Error, EOFError, OSError) as error:
             return _fail_assembly(db, tenant_id, asset_id, history, error)
     finally:
-        run_locks.discard(asset_id)
-
-
+        _release_run_lock(asset_id)
 def retry_long_form(
     db: Database,
     settings: Any,
@@ -392,20 +418,19 @@ def retry_long_form(
     provider: Optional[TTSProvider] = None,
 ) -> Dict[str, Any]:
     """Regenerate ONLY failed/missing chunks from the stored snapshot, reassemble."""
-    history = _check_runnable(asset)
-    if provider is None:
-        provider = build_tts_provider(settings)
-    header = history[0]
-    snapshot = header["settings"]
-    fmt = snapshot["response_format"]
-    if fmt not in LONGFORM_FORMATS:
-        raise ValueError(f"long-form assembly supports {LONGFORM_FORMATS} only, not {fmt!r}")
-
+    history = _check_runnable(asset)  # also acquires the run lock
     asset_id = asset["id"]
-    store = AudioFileStore(settings.audio_storage_path)
-    chunk_entries = [e for e in history[1:] if e.get("kind") == "chunk"]
-    run_locks.add(asset_id)
     try:
+        if provider is None:
+            provider = build_tts_provider(settings)
+        header = history[0]
+        snapshot = header["settings"]
+        fmt = snapshot["response_format"]
+        if fmt not in LONGFORM_FORMATS:
+            raise ValueError(f"long-form assembly supports {LONGFORM_FORMATS} only, not {fmt!r}")
+
+        store = AudioFileStore(settings.audio_storage_path)
+        chunk_entries = [e for e in history[1:] if e.get("kind") == "chunk"]
         for index, entry in enumerate(chunk_entries):
             path = _chunk_path(store, tenant_id, asset_id, index, fmt)
             if entry.get("state") == "ready" and path.exists():
@@ -441,7 +466,7 @@ def retry_long_form(
                 {"chunks": len(chunk_entries), "provider": provider.id, "retry": True},
             )
             return finished
-        except ValueError as error:
+        except (ValueError, wave.Error, EOFError, OSError) as error:
             return _fail_assembly(db, tenant_id, asset_id, history, error)
     finally:
-        run_locks.discard(asset_id)
+        _release_run_lock(asset_id)

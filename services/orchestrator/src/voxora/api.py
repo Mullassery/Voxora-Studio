@@ -21,7 +21,7 @@ from .config import Settings, TenantPrincipal
 from .crm import build_crm_adapter, provider_catalog
 from .crm.sync import sync_connection
 from .db import Database, database_from_settings, iso
-from .longform import generate_long_form, retry_long_form
+from .longform import RunInFlightError, generate_long_form, retry_long_form
 from .models import (
     AgentCreate,
     AiDecideRequest,
@@ -1270,17 +1270,22 @@ def create_app(
         """
         _require_writer(principal)
         try:
+            # Build the provider at the edge: unconfigured → 501, matching
+            # the single-request generate route's contract.
+            provider = build_tts_provider(app.state.settings)
+        except ValueError as error:
+            raise ApiError(501, str(error), "audio_provider_unconfigured") from None
+        try:
             asset = generate_long_form(
                 app.state.db,
                 app.state.settings,
                 principal.tenant_id,
                 principal.name,
                 payload.model_dump(),
+                provider=provider,
             )
         except ValueError as error:
             raise ApiError(422, str(error), "longform_invalid") from None
-        except AudioGenerationError as error:
-            raise ApiError(502, error.detail, "audio_provider_failed") from None
         return asset
 
     @app.post("/api/v1/audio-assets/{asset_id}/retry-failed")
@@ -1294,19 +1299,22 @@ def create_app(
         if asset is None:
             raise ApiError(404, "audio asset not found", "not_found")
         try:
+            provider = build_tts_provider(app.state.settings)
+        except ValueError as error:
+            raise ApiError(501, str(error), "audio_provider_unconfigured") from None
+        try:
             return retry_long_form(
                 app.state.db,
                 app.state.settings,
                 principal.tenant_id,
                 principal.name,
                 asset,
+                provider=provider,
             )
+        except RunInFlightError as error:
+            raise ApiError(409, str(error), "run_in_flight") from None
         except ValueError as error:
-            message = str(error)
-            code = "run_in_flight" if "in flight" in message else "longform_invalid"
-            raise ApiError(409, message, code) from None
-        except AudioGenerationError as error:
-            raise ApiError(502, error.detail, "audio_provider_failed") from None
+            raise ApiError(409, str(error), "longform_invalid") from None
 
     @app.get("/api/v1/audio-assets")
     def list_audio_assets(
