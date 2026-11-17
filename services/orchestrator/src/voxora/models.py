@@ -154,6 +154,32 @@ class AudioAssetGenerate(BaseModel):
         return self
 
 
+class LongFormGenerate(BaseModel):
+    """One long-form generation request (roadmap M10 Phase D).
+
+    Script cap 262144 = 64 chunks x 4096 chars; assembly is WAV/PCM only
+    (no in-repo decoder for compressed formats — same ruling as variants).
+    """
+
+    model_config = {"extra": "forbid"}
+
+    script: str = Field(min_length=1, max_length=262144)
+    voice: str = Field(min_length=1, max_length=80)
+    model: Literal["tts-1", "tts-1-hd", "gpt-4o-mini-tts"] = "tts-1"
+    speed: float = Field(default=1.0, ge=0.25, le=4.0)
+    response_format: Literal["mp3", "opus", "aac", "flac", "wav", "pcm"] = "wav"
+    instructions: Optional[str] = Field(default=None, max_length=4096)
+    title: Optional[str] = Field(default=None, max_length=120)
+    language: Optional[str] = Field(default=None, max_length=40)
+    max_chunk_chars: int = Field(default=4096, ge=500, le=4096)
+
+    @model_validator(mode="after")
+    def _instructions_only_on_capable_models(self) -> "LongFormGenerate":
+        if self.instructions is not None and self.model != "gpt-4o-mini-tts":
+            raise ValueError("instructions is only supported with gpt-4o-mini-tts")
+        return self
+
+
 class VariantOp(BaseModel):
     """One non-destructive variant operation (roadmap M10 Phase C).
 

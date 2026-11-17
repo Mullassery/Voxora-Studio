@@ -21,6 +21,7 @@ from .config import Settings, TenantPrincipal
 from .crm import build_crm_adapter, provider_catalog
 from .crm.sync import sync_connection
 from .db import Database, database_from_settings, iso
+from .longform import generate_long_form, retry_long_form
 from .models import (
     AgentCreate,
     AiDecideRequest,
@@ -33,6 +34,7 @@ from .models import (
     ContactImport,
     CrmConnectionCreate,
     CrmSyncRequest,
+    LongFormGenerate,
     MappingsUpdate,
     RecipientAdd,
     SessionInstruction,
@@ -1256,6 +1258,56 @@ def create_app(
         )
         return asset
 
+    @app.post("/api/v1/audio-assets/generate-long", status_code=201)
+    def generate_audio_asset_long(
+        payload: LongFormGenerate,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        """Long-form generation (M10 Phase D): chunked, assembled, honest.
+
+        201 even on partial chunk failure — the body carries `processing`
+        status and the failed chunk; retry-failed completes the run.
+        """
+        _require_writer(principal)
+        try:
+            asset = generate_long_form(
+                app.state.db,
+                app.state.settings,
+                principal.tenant_id,
+                principal.name,
+                payload.model_dump(),
+            )
+        except ValueError as error:
+            raise ApiError(422, str(error), "longform_invalid") from None
+        except AudioGenerationError as error:
+            raise ApiError(502, error.detail, "audio_provider_failed") from None
+        return asset
+
+    @app.post("/api/v1/audio-assets/{asset_id}/retry-failed")
+    def retry_audio_asset_failed(
+        asset_id: str,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        """Retry ONLY failed chunks of a long-form run (M10 Phase D)."""
+        _require_writer(principal)
+        asset = app.state.db.get_audio_asset(principal.tenant_id, asset_id)
+        if asset is None:
+            raise ApiError(404, "audio asset not found", "not_found")
+        try:
+            return retry_long_form(
+                app.state.db,
+                app.state.settings,
+                principal.tenant_id,
+                principal.name,
+                asset,
+            )
+        except ValueError as error:
+            message = str(error)
+            code = "run_in_flight" if "in flight" in message else "longform_invalid"
+            raise ApiError(409, message, code) from None
+        except AudioGenerationError as error:
+            raise ApiError(502, error.detail, "audio_provider_failed") from None
+
     @app.get("/api/v1/audio-assets")
     def list_audio_assets(
         limit: int = Query(default=50, ge=1, le=200),
@@ -1287,6 +1339,8 @@ def create_app(
         asset = app.state.db.get_audio_asset(principal.tenant_id, asset_id)
         if asset is None:
             raise ApiError(404, "audio asset not found", "not_found")
+        if asset["status"] == "processing":
+            raise ApiError(409, "audio asset is still processing", "still_processing")
         store = AudioFileStore(app.state.settings.audio_storage_path)
         path = store.path_for(principal.tenant_id, asset_id, asset["format"])
         if not path.exists():
@@ -1311,6 +1365,8 @@ def create_app(
             raise ApiError(404, "audio asset not found", "not_found")
         store = AudioFileStore(app.state.settings.audio_storage_path)
         store.delete(store.path_for(principal.tenant_id, asset_id, asset["format"]))
+        for chunk_file in (store.root / principal.tenant_id).glob(f"{asset_id}_chunk_*"):
+            store.delete(chunk_file)
         app.state.db.audit(
             principal.tenant_id,
             principal.name,
@@ -1337,6 +1393,8 @@ def create_app(
         parent = app.state.db.get_audio_asset(principal.tenant_id, asset_id)
         if parent is None:
             raise ApiError(404, "audio asset not found", "not_found")
+        if parent["status"] != "ready":
+            raise ApiError(422, "asset is not ready for variant processing", "variant_invalid")
         from .variants import create_variant
 
         ops = [op.model_dump(exclude_none=True) for op in payload.ops]
