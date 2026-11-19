@@ -34,10 +34,12 @@ class CampaignEngine:
         worker_threads: int = 4,
         global_concurrency: int = 5,
         clock: Optional[Any] = None,
+        settings: Optional[Any] = None,
     ):
         self.db = db
         self.telephony = telephony
         self.from_number = from_number
+        self.settings = settings
         self.worker_threads = max(1, worker_threads)
         self.global_concurrency = max(1, global_concurrency)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
@@ -179,6 +181,19 @@ class CampaignEngine:
         if campaign["status"] == "running":
             self.db.complete_campaign_if_done(tenant_id, campaign["id"])
 
+    def _notify_session_webhooks(self, call: Dict[str, Any]) -> None:
+        """Best-effort webhook dispatch after a voice-session settle.
+
+        Voice-session calls carry the session id in ``campaign_id``; delivery
+        failures are recorded (and dead-lettered by the PyReverseETL
+        transport), never raised into the worker loop.
+        """
+        if self.settings is None:
+            return
+        from .voice_sessions import dispatch_pending_webhooks
+
+        dispatch_pending_webhooks(self.db, self.settings, call["tenant_id"], call["campaign_id"])
+
     def _apply_result(
         self,
         item: Dict[str, Any],
@@ -266,7 +281,25 @@ class CampaignEngine:
             return "duplicate"
         campaign = self.db.get_campaign(tenant_id, call["campaign_id"])
         if campaign is None:
-            return "unknown_campaign"
+            # Voice-session calls carry the session id in campaign_id; they
+            # settle through the session service, not the campaign engine.
+            from .telephony.base import TelephonyResult as _TR
+            from .voice_sessions import settle_voice_session
+
+            if isinstance(result, _TR):
+                status = settle_voice_session(
+                    self.db,
+                    call,
+                    result.disposition,
+                    result.ok,
+                    {"simulated": result.simulated},
+                    settings=self.settings,
+                )
+                self._notify_session_webhooks(call)
+                return "settled" if status else "unknown_call"
+            status = settle_voice_session(self.db, call, "", False, settings=self.settings)
+            self._notify_session_webhooks(call)
+            return "settled" if status else "unknown_campaign"
         self._apply_result(
             {
                 "id": call["recipient_id"],

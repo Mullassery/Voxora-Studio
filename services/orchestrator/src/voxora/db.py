@@ -27,13 +27,53 @@ from .state import (
 
 JSON_COLUMNS = {
     "capabilities",
+    "config",
     "custom_fields",
     "metadata",
     "data",
     "errors",
     "payload",
     "latency",
+    "session_metadata",
+    "transcript",
+    "voice_boost",
+    "processing_history",
+    "defaults",
+    "settings",
 }
+
+MODEL_PROFILE_TASKS = ("turn", "analyze")
+DEFAULT_MODEL_PROFILE = "default"
+
+
+def builtin_model_profiles() -> Dict[str, Dict[str, str]]:
+    """Config-in-db seed source for model profiles.
+
+    `VOXORA_MODEL_PROFILES` (JSON `{profile: {task: model}}`) seeds extra
+    named profiles; otherwise the built-in `default` profile routes the
+    interview turn to `OPENROUTER_MODEL` (or `mock-llm`) and the
+    summarize/analyze task to `OPENROUTER_ANALYZE_MODEL` (or the turn
+    model). Read at seed time so tests and operators can set env before
+    the first tenant is ensured; once seeded, the DB rows are the source
+    of truth (config-in-db).
+    """
+    raw = os.environ.get("VOXORA_MODEL_PROFILES")
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            seeded = {
+                str(name): {str(task): str(model) for task, model in models.items()}
+                for name, models in parsed.items()
+                if isinstance(models, dict) and models
+            }
+            if seeded:
+                return seeded
+    turn = os.environ.get("OPENROUTER_MODEL") or "mock-llm"
+    analyze = os.environ.get("OPENROUTER_ANALYZE_MODEL") or turn
+    return {DEFAULT_MODEL_PROFILE: {"turn": turn, "analyze": analyze}}
 
 
 def database_from_settings(settings: Any) -> Database:
@@ -140,7 +180,10 @@ CREATE TABLE IF NOT EXISTS campaigns (
     started_at TEXT,
     completed_at TEXT,
     paused_at TEXT,
-    last_error TEXT
+    last_error TEXT,
+    audience_source TEXT,
+    audience_id TEXT,
+    audience_version TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_campaigns_tenant ON campaigns(tenant_id, created_at);
 
@@ -208,6 +251,74 @@ CREATE TABLE IF NOT EXISTS call_latency (
 );
 CREATE INDEX IF NOT EXISTS idx_latency_tenant ON call_latency(tenant_id, stage, simulated);
 
+CREATE TABLE IF NOT EXISTS voice_sessions (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    external_application TEXT NOT NULL,
+    external_session_id TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    model_profile TEXT,
+    contact_id TEXT NOT NULL,
+    call_id TEXT,
+    status TEXT NOT NULL,
+    webhook_url TEXT,
+    session_metadata TEXT NOT NULL DEFAULT '{}',
+    transcript TEXT NOT NULL DEFAULT '[]',
+    provider TEXT NOT NULL DEFAULT 'mock',
+    simulated INTEGER NOT NULL DEFAULT 1,
+    recording_url TEXT,
+    recording_sid TEXT,
+    voice_boost TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(tenant_id, external_application, external_session_id)
+);
+CREATE INDEX IF NOT EXISTS idx_voice_sessions_tenant ON voice_sessions(tenant_id, created_at);
+
+CREATE TABLE IF NOT EXISTS voice_session_events (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    event_version TEXT NOT NULL DEFAULT '1.0',
+    occurred_at TEXT NOT NULL,
+    data TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_voice_session_events_session ON voice_session_events(session_id, occurred_at);
+
+CREATE TABLE IF NOT EXISTS voice_session_instructions (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    instruction_id TEXT NOT NULL,
+    type TEXT NOT NULL,
+    text TEXT NOT NULL,
+    priority TEXT NOT NULL DEFAULT 'normal',
+    status TEXT NOT NULL DEFAULT 'received',
+    created_at TEXT NOT NULL,
+    UNIQUE(session_id, instruction_id)
+);
+
+CREATE TABLE IF NOT EXISTS voice_session_deliveries (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    ok INTEGER NOT NULL DEFAULT 0,
+    detail TEXT,
+    at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS voice_session_checkpoints (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    transcript TEXT NOT NULL DEFAULT '[]',
+    flushed_at TEXT NOT NULL,
+    UNIQUE(tenant_id, session_id)
+);
+
 CREATE TABLE IF NOT EXISTS crm_connections (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
@@ -218,6 +329,7 @@ CREATE TABLE IF NOT EXISTS crm_connections (
     webhook_secret_encrypted TEXT,
     status TEXT NOT NULL DEFAULT 'untested',
     capabilities TEXT NOT NULL DEFAULT '{}',
+    config TEXT NOT NULL DEFAULT '{}',
     last_tested_at TEXT,
     last_error TEXT,
     created_at TEXT NOT NULL,
@@ -278,6 +390,105 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_audit_tenant ON audit_logs(tenant_id, created_at);
+
+CREATE TABLE IF NOT EXISTS model_profiles (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    profile TEXT NOT NULL,
+    task TEXT NOT NULL,
+    model TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(tenant_id, profile, task)
+);
+CREATE INDEX IF NOT EXISTS idx_model_profiles_tenant ON model_profiles(tenant_id, profile);
+
+CREATE TABLE IF NOT EXISTS voice_boost_settings (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL UNIQUE,
+    profile TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    config TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS audio_assets (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    script TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    voice TEXT NOT NULL,
+    language TEXT,
+    speed REAL NOT NULL DEFAULT 1.0,
+    format TEXT NOT NULL,
+    duration_seconds REAL,
+    file_size INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    storage_path TEXT NOT NULL,
+    parent_asset_id TEXT,
+    processing_history TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audio_assets_tenant ON audio_assets(tenant_id, created_at);
+
+CREATE TABLE IF NOT EXISTS audio_batch_jobs (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    status TEXT NOT NULL,
+    defaults TEXT NOT NULL DEFAULT '{}',
+    total INTEGER NOT NULL DEFAULT 0,
+    completed INTEGER NOT NULL DEFAULT 0,
+    failed INTEGER NOT NULL DEFAULT 0,
+    rate_limited INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_audio_batch_jobs_tenant ON audio_batch_jobs(tenant_id, created_at);
+
+CREATE TABLE IF NOT EXISTS audio_batch_items (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    batch_id TEXT NOT NULL,
+    row_number INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    script TEXT NOT NULL,
+    voice TEXT NOT NULL,
+    language TEXT,
+    status TEXT NOT NULL,
+    asset_id TEXT,
+    error TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    rate_limited INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    settings TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(batch_id, row_number)
+);
+CREATE INDEX IF NOT EXISTS idx_audio_batch_items_tenant ON audio_batch_items(tenant_id, batch_id, row_number);
+CREATE INDEX IF NOT EXISTS idx_audio_batch_items_claim ON audio_batch_items(status, next_attempt_at, created_at);
+
+CREATE TABLE IF NOT EXISTS ai_usage (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    profile TEXT,
+    task TEXT NOT NULL DEFAULT 'turn',
+    model TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    prompt_tokens REAL NOT NULL DEFAULT 0,
+    completion_tokens REAL NOT NULL DEFAULT 0,
+    total_tokens REAL NOT NULL DEFAULT 0,
+    cost_usd REAL NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ai_usage_tenant ON ai_usage(tenant_id, created_at);
 """
 
 
@@ -330,6 +541,64 @@ class Database:
     def initialize(self) -> None:
         with self._write() as connection:
             connection.executescript(SCHEMA)
+            self._migrate_campaigns(connection)
+            self._migrate_voice_sessions(connection)
+            self._migrate_voice_boost_settings(connection)
+            self._migrate_crm_connections(connection)
+
+    @staticmethod
+    def _migrate_crm_connections(connection: sqlite3.Connection) -> None:
+        """Idempotent column addition for databases created before provider config."""
+        existing = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(crm_connections)").fetchall()
+        }
+        if "config" not in existing:
+            connection.execute("ALTER TABLE crm_connections ADD COLUMN config TEXT NOT NULL DEFAULT '{}'")
+
+    @staticmethod
+    def _migrate_voice_sessions(connection: sqlite3.Connection) -> None:
+        """Idempotent column additions for databases created before recordings."""
+        existing = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(voice_sessions)").fetchall()
+        }
+        for column in ("recording_url", "recording_sid"):
+            if column not in existing:
+                connection.execute(f"ALTER TABLE voice_sessions ADD COLUMN {column} TEXT")
+        if "voice_boost" not in existing:
+            connection.execute(
+                "ALTER TABLE voice_sessions ADD COLUMN voice_boost TEXT NOT NULL DEFAULT '{}'"
+            )
+
+    @staticmethod
+    def _migrate_voice_boost_settings(connection: sqlite3.Connection) -> None:
+        """Idempotent column additions for databases created before the master switch."""
+        existing = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(voice_boost_settings)").fetchall()
+        }
+        if existing and "enabled" not in existing:
+            connection.execute(
+                "ALTER TABLE voice_boost_settings ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1"
+            )
+
+    @staticmethod
+    def _migrate_campaigns(connection: sqlite3.Connection) -> None:
+        """Idempotent column additions for databases created before audience imports."""
+        existing = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(campaigns)").fetchall()
+        }
+        for column, definition in (
+            ("audience_source", "TEXT"),
+            ("audience_id", "TEXT"),
+            ("audience_version", "TEXT"),
+        ):
+            if column not in existing:
+                connection.execute(
+                    f"ALTER TABLE campaigns ADD COLUMN {column} {definition}"  # noqa: S608 - fixed internal names
+                )
 
     def ping(self) -> bool:
         with self._read() as connection:
@@ -367,6 +636,454 @@ class Database:
             rows = connection.execute(
                 "SELECT * FROM audit_logs WHERE tenant_id=? ORDER BY created_at DESC LIMIT ? OFFSET ?",
                 (tenant_id, limit, offset),
+            ).fetchall()
+        return [self._decode(row) for row in rows]
+
+    # --------------------------------------------------------- model profiles
+    def seed_model_profiles(self, tenant_id: str, profiles: Dict[str, Dict[str, str]]) -> None:
+        """Idempotent config-in-db seed of `{profile: {task: model}}` rows."""
+        now = iso()
+        with self._write() as connection:
+            for profile, tasks in profiles.items():
+                for task, model in tasks.items():
+                    connection.execute(
+                        "INSERT OR IGNORE INTO model_profiles"
+                        " (id, tenant_id, profile, task, model, created_at, updated_at)"
+                        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (new_id("mp"), tenant_id, profile, task, model, now, now),
+                    )
+
+    def list_model_profiles(self, tenant_id: str) -> List[Dict[str, Any]]:
+        with self._read() as connection:
+            rows = connection.execute(
+                "SELECT profile, task, model FROM model_profiles WHERE tenant_id=? ORDER BY profile, task",
+                (tenant_id,),
+            ).fetchall()
+        return [self._decode(row) for row in rows]
+
+    def get_model_profile(self, tenant_id: str, profile: str, task: str) -> Optional[Dict[str, Any]]:
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT profile, task, model FROM model_profiles"
+                " WHERE tenant_id=? AND profile=? AND task=?",
+                (tenant_id, profile, task),
+            ).fetchone()
+        return self._decode(row) if row else None
+
+    # --------------------------------------------------- voice boost settings
+    def seed_voice_boost_settings(
+        self, tenant_id: str, profile: str, config: Dict[str, Any], enabled: bool = True
+    ) -> None:
+        """Idempotent config-in-db seed of the tenant's global Boost row."""
+        now = iso()
+        with self._write() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO voice_boost_settings"
+                " (id, tenant_id, profile, enabled, config, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (new_id("vbs"), tenant_id, profile, int(enabled), json.dumps(config), now),
+            )
+
+    def get_voice_boost_settings(self, tenant_id: str) -> Optional[Dict[str, Any]]:
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT profile, enabled, config, updated_at FROM voice_boost_settings"
+                " WHERE tenant_id=?",
+                (tenant_id,),
+            ).fetchone()
+        decoded = self._decode(row) if row else None
+        if decoded is not None:
+            decoded["enabled"] = bool(decoded.get("enabled", 1))
+        return decoded
+
+    def put_voice_boost_settings(
+        self, tenant_id: str, profile: str, config: Dict[str, Any], enabled: bool = True
+    ) -> Dict[str, Any]:
+        now = iso()
+        with self._write() as connection:
+            connection.execute(
+                "INSERT INTO voice_boost_settings"
+                " (id, tenant_id, profile, enabled, config, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(tenant_id) DO UPDATE SET"
+                " profile=?, enabled=?, config=?, updated_at=?",
+                (
+                    new_id("vbs"),
+                    tenant_id,
+                    profile,
+                    int(enabled),
+                    json.dumps(config),
+                    now,
+                    profile,
+                    int(enabled),
+                    json.dumps(config),
+                    now,
+                ),
+            )
+        stored = self.get_voice_boost_settings(tenant_id)
+        assert stored is not None
+        return stored
+
+    # ------------------------------------------------------------ audio assets
+    def create_audio_asset(self, tenant_id: str, values: Dict[str, Any]) -> Dict[str, Any]:
+        now = iso()
+        asset_id = values.get("id") or new_id("aud")
+        with self._write() as connection:
+            connection.execute(
+                "INSERT INTO audio_assets"
+                " (id, tenant_id, title, script, provider, model, voice, language,"
+                "  speed, format, duration_seconds, file_size, status, storage_path,"
+                "  parent_asset_id, processing_history, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    asset_id,
+                    tenant_id,
+                    values["title"],
+                    values["script"],
+                    values["provider"],
+                    values["model"],
+                    values["voice"],
+                    values.get("language"),
+                    values.get("speed", 1.0),
+                    values["format"],
+                    values.get("duration_seconds"),
+                    values["file_size"],
+                    values.get("status", "ready"),
+                    values["storage_path"],
+                    values.get("parent_asset_id"),
+                    json.dumps(values.get("processing_history", [])),
+                    now,
+                    now,
+                ),
+            )
+        asset = self.get_audio_asset(tenant_id, asset_id)
+        assert asset is not None
+        return asset
+
+    def get_audio_asset(self, tenant_id: str, asset_id: str) -> Optional[Dict[str, Any]]:
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT * FROM audio_assets WHERE tenant_id=? AND id=?",
+                (tenant_id, asset_id),
+            ).fetchone()
+        return self._decode(row) if row else None
+
+    def list_audio_assets(
+        self,
+        tenant_id: str,
+        limit: int = 50,
+        offset: int = 0,
+        search: Optional[str] = None,
+        status: Optional[str] = None,
+        provider: Optional[str] = None,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        clauses = ["tenant_id=?"]
+        params: List[Any] = [tenant_id]
+        if search:
+            clauses.append("LOWER(title) LIKE LOWER(?)")
+            params.append(f"%{search}%")
+        if status:
+            clauses.append("status=?")
+            params.append(status)
+        if provider:
+            clauses.append("provider=?")
+            params.append(provider)
+        where = " WHERE " + " AND ".join(clauses)
+        with self._read() as connection:
+            total = connection.execute(
+                f"SELECT COUNT(*) AS n FROM audio_assets{where}", params
+            ).fetchone()
+            count = total["n"]
+            rows = connection.execute(
+                f"SELECT * FROM audio_assets{where} ORDER BY created_at DESC, id LIMIT ? OFFSET ?",  # noqa: S608 - internal clause from fixed fragments
+                [*params, limit, offset],
+            ).fetchall()
+        items = [self._decode(row) for row in rows]
+        return items, int(count)
+
+    def update_audio_asset(
+        self, tenant_id: str, asset_id: str, **fields: Any
+    ) -> Optional[Dict[str, Any]]:
+        allowed = {"title", "status", "duration_seconds", "file_size", "processing_history"}
+        updates = [(key, value) for key, value in fields.items() if key in allowed]
+        if not updates:
+            return self.get_audio_asset(tenant_id, asset_id)
+        setters = ", ".join(f"{key}=?" for key, _ in updates)
+        params: List[Any] = []
+        for key, value in updates:
+            params.append(
+                json.dumps(value) if key == "processing_history" else value
+            )
+        params += [iso(), tenant_id, asset_id]
+        with self._write() as connection:
+            connection.execute(
+                f"UPDATE audio_assets SET {setters}, updated_at=? WHERE tenant_id=? AND id=?",  # noqa: S608 - setters from hardcoded allowlist
+                params,
+            )
+        return self.get_audio_asset(tenant_id, asset_id)
+
+    def list_audio_asset_variants(
+        self, tenant_id: str, parent_asset_id: str
+    ) -> List[Dict[str, Any]]:
+        with self._read() as connection:
+            rows = connection.execute(
+                "SELECT * FROM audio_assets"
+                " WHERE tenant_id=? AND parent_asset_id=? ORDER BY created_at ASC",
+                (tenant_id, parent_asset_id),
+            ).fetchall()
+        return [self._decode(row) for row in rows]
+
+    def delete_audio_asset(self, tenant_id: str, asset_id: str) -> bool:
+        with self._write() as connection:
+            cursor = connection.execute(
+                "DELETE FROM audio_assets WHERE tenant_id=? AND id=?",
+                (tenant_id, asset_id),
+            )
+        return cursor.rowcount == 1
+
+    def count_audio_assets_by_status(self, tenant_id: str) -> Dict[str, int]:
+        with self._read() as connection:
+            rows = connection.execute(
+                "SELECT status, COUNT(*) AS n FROM audio_assets WHERE tenant_id=? GROUP BY status",
+                (tenant_id,),
+            ).fetchall()
+        return {row["status"]: int(row["n"]) for row in rows}
+
+    # ------------------------------------------------------- audio batch jobs
+    def create_audio_batch(
+        self,
+        tenant_id: str,
+        filename: str,
+        defaults: Dict[str, Any],
+        records: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Create a job and all its CSV rows in one tenant-scoped transaction."""
+        now = iso()
+        batch_id = new_id("abt")
+        with self._write() as connection:
+            connection.execute(
+                "INSERT INTO audio_batch_jobs (id, tenant_id, filename, status, defaults,"
+                " total, created_at, updated_at) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?)",
+                (batch_id, tenant_id, filename, json.dumps(defaults), len(records), now, now),
+            )
+            for record in records:
+                connection.execute(
+                    "INSERT INTO audio_batch_items (id, tenant_id, batch_id, row_number, title,"
+                    " script, voice, language, status, settings, created_at, updated_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)",
+                    (
+                        new_id("abi"),
+                        tenant_id,
+                        batch_id,
+                        int(record["row_number"]),
+                        record["title"],
+                        record["script"],
+                        record["voice"],
+                        record.get("language"),
+                        json.dumps(record.get("settings", {})),
+                        now,
+                        now,
+                    ),
+                )
+        return self.get_audio_batch(tenant_id, batch_id)  # type: ignore[return-value]
+
+    def get_audio_batch(
+        self, tenant_id: str, batch_id: str
+    ) -> Optional[Dict[str, Any]]:
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT * FROM audio_batch_jobs WHERE tenant_id=? AND id=?",
+                (tenant_id, batch_id),
+            ).fetchone()
+        if row is None:
+            return None
+        job = self._decode(row)
+        job["items"] = self.list_audio_batch_items(tenant_id, batch_id)
+        return job
+
+    def list_audio_batches(
+        self, tenant_id: str, limit: int = 50, offset: int = 0
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        with self._read() as connection:
+            total = connection.execute(
+                "SELECT COUNT(*) AS n FROM audio_batch_jobs WHERE tenant_id=?", (tenant_id,)
+            ).fetchone()["n"]
+            rows = connection.execute(
+                "SELECT * FROM audio_batch_jobs WHERE tenant_id=?"
+                " ORDER BY created_at DESC, id LIMIT ? OFFSET ?",
+                (tenant_id, limit, offset),
+            ).fetchall()
+        return [self._decode(row) for row in rows], int(total)
+
+    def list_audio_batch_items(
+        self, tenant_id: str, batch_id: str
+    ) -> List[Dict[str, Any]]:
+        with self._read() as connection:
+            rows = connection.execute(
+                "SELECT * FROM audio_batch_items WHERE tenant_id=? AND batch_id=?"
+                " ORDER BY row_number ASC",
+                (tenant_id, batch_id),
+            ).fetchall()
+        return [self._decode(row) for row in rows]
+
+    def claim_audio_batch_items(self, limit: int) -> List[Dict[str, Any]]:
+        """Atomically claim queued items from live jobs (never call work)."""
+        now = iso()
+        claimed: List[Dict[str, Any]] = []
+        with self._write() as connection:
+            self._claim_prelude(connection)
+            rows = connection.execute(
+                "SELECT i.*, j.defaults FROM audio_batch_items i"
+                " JOIN audio_batch_jobs j ON j.id=i.batch_id"
+                " WHERE i.status='queued' AND j.status IN ('queued','processing')"
+                " AND (i.next_attempt_at IS NULL OR i.next_attempt_at <= ?)"
+                " ORDER BY i.created_at ASC, i.row_number ASC LIMIT ?"
+                + self._claim_row_lock(),
+                (now, limit),
+            ).fetchall()
+            for row in rows:
+                update = connection.execute(
+                    "UPDATE audio_batch_items SET status='processing', attempts=attempts+1,"
+                    " updated_at=? WHERE id=? AND status='queued'",
+                    (now, row["id"]),
+                )
+                if getattr(update, "rowcount", 1) != 1:
+                    continue
+                connection.execute(
+                    "UPDATE audio_batch_jobs SET status='processing',"
+                    " started_at=COALESCE(started_at, ?), updated_at=?"
+                    " WHERE id=? AND tenant_id=? AND status IN ('queued','processing')",
+                    (now, now, row["batch_id"], row["tenant_id"]),
+                )
+                item = self._decode(row)
+                item["attempts"] = int(row["attempts"]) + 1
+                claimed.append(item)
+        return claimed
+
+    def complete_audio_batch_item(
+        self,
+        tenant_id: str,
+        batch_id: str,
+        item_id: str,
+        *,
+        status: str,
+        asset_id: Optional[str] = None,
+        error: Optional[str] = None,
+        rate_limited: bool = False,
+        next_attempt_at: Optional[str] = None,
+    ) -> None:
+        """Finish one item and recompute its job counters in one transaction."""
+        now = iso()
+        with self._write() as connection:
+            update = connection.execute(
+                "UPDATE audio_batch_items SET status=?, asset_id=?, error=?, rate_limited=?,"
+                " next_attempt_at=?, updated_at=?"
+                " WHERE tenant_id=? AND batch_id=? AND id=?",
+                (
+                    status,
+                    asset_id,
+                    error,
+                    int(bool(rate_limited)),
+                    next_attempt_at,
+                    now,
+                    tenant_id,
+                    batch_id,
+                    item_id,
+                ),
+            )
+            if getattr(update, "rowcount", 1) != 1:
+                return
+            rows = connection.execute(
+                "SELECT status, rate_limited FROM audio_batch_items WHERE batch_id=?",
+                (batch_id,),
+            ).fetchall()
+            completed = sum(1 for row in rows if row["status"] == "ready")
+            failed = sum(1 for row in rows if row["status"] == "failed")
+            throttled = sum(int(bool(row["rate_limited"])) for row in rows)
+            pending = any(row["status"] in ("queued", "processing") for row in rows)
+            connection.execute(
+                "UPDATE audio_batch_jobs SET completed=?, failed=?, rate_limited=?, status=?,"
+                " completed_at=?, updated_at=? WHERE tenant_id=? AND id=?",
+                (
+                    completed,
+                    failed,
+                    throttled,
+                    "processing" if pending else "completed",
+                    None if pending else now,
+                    now,
+                    tenant_id,
+                    batch_id,
+                ),
+            )
+
+    def retry_failed_audio_batch_items(
+        self, tenant_id: str, batch_id: str
+    ) -> Optional[Tuple[int, Dict[str, Any]]]:
+        """Requeue FAILED items only; ready items are never regenerated."""
+        now = iso()
+        with self._write() as connection:
+            job = connection.execute(
+                "SELECT * FROM audio_batch_jobs WHERE tenant_id=? AND id=?",
+                (tenant_id, batch_id),
+            ).fetchone()
+            if job is None:
+                return None
+            cursor = connection.execute(
+                "UPDATE audio_batch_items SET status='queued', error=NULL,"
+                " rate_limited=0, next_attempt_at=NULL, updated_at=?"
+                " WHERE tenant_id=? AND batch_id=? AND status='failed'",
+                (now, tenant_id, batch_id),
+            )
+            count = int(getattr(cursor, "rowcount", 0))
+            connection.execute(
+                "UPDATE audio_batch_jobs SET status=?, error=NULL, completed_at=NULL,"
+                " updated_at=? WHERE tenant_id=? AND id=?",
+                (job["status"] if count == 0 else "queued", now, tenant_id, batch_id),
+            )
+        refreshed = self.get_audio_batch(tenant_id, batch_id)
+        assert refreshed is not None
+        return count, refreshed
+
+    # --------------------------------------------------------------- ai usage
+    def record_ai_usage(
+        self,
+        tenant_id: str,
+        *,
+        profile: Optional[str],
+        task: str,
+        model: str,
+        provider: str,
+        prompt_tokens: float = 0.0,
+        completion_tokens: float = 0.0,
+        total_tokens: float = 0.0,
+        cost_usd: float = 0.0,
+    ) -> None:
+        with self._write() as connection:
+            connection.execute(
+                "INSERT INTO ai_usage"
+                " (id, tenant_id, profile, task, model, provider, prompt_tokens,"
+                "  completion_tokens, total_tokens, cost_usd, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    new_id("aiu"),
+                    tenant_id,
+                    profile,
+                    task,
+                    model,
+                    provider,
+                    float(prompt_tokens),
+                    float(completion_tokens),
+                    float(total_tokens),
+                    float(cost_usd),
+                    iso(),
+                ),
+            )
+
+    def list_ai_usage(self, tenant_id: str, limit: int = 100) -> List[Dict[str, Any]]:
+        with self._read() as connection:
+            rows = connection.execute(
+                "SELECT * FROM ai_usage WHERE tenant_id=? ORDER BY created_at DESC, id DESC LIMIT ?",
+                (tenant_id, limit),
             ).fetchall()
         return [self._decode(row) for row in rows]
 
@@ -599,6 +1316,274 @@ class Database:
             )
             return cursor.rowcount > 0
 
+    # ------------------------------------------------------- voice sessions
+    def create_voice_session(self, tenant_id: str, values: Dict[str, Any]) -> Dict[str, Any]:
+        """Idempotent session creation on (tenant, external_application, external_session_id)."""
+        now = iso()
+        with self._write() as connection:
+            connection.execute(
+                "INSERT INTO voice_sessions (id, tenant_id, external_application,"
+                " external_session_id, agent_id, model_profile, contact_id, call_id, status,"
+                " webhook_url, session_metadata, transcript, provider, simulated,"
+                " voice_boost, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(tenant_id, external_application, external_session_id) DO NOTHING",
+                (
+                    values.get("id") or new_id("vxs"),
+                    tenant_id,
+                    values["external_application"],
+                    values["external_session_id"],
+                    values["agent_id"],
+                    values.get("model_profile"),
+                    values["contact_id"],
+                    values.get("call_id"),
+                    values.get("status", "created"),
+                    values.get("webhook_url"),
+                    json.dumps(values.get("session_metadata", {})),
+                    json.dumps(values.get("transcript", [])),
+                    values.get("provider", "mock"),
+                    int(bool(values.get("simulated", True))),
+                    json.dumps(values.get("voice_boost", {})),
+                    now,
+                    now,
+                ),
+            )
+        # RETURNING-equivalent read keeps sqlite/postgres symmetry.
+        session_id = values.get("id") or ""
+        session = self.get_voice_session(tenant_id, session_id) or self.get_voice_session_by_external(
+            tenant_id, values["external_application"], values["external_session_id"]
+        )
+        if session is None:  # contract: the row exists directly after the upsert
+            raise RuntimeError("voice session row vanished after upsert")
+        return session
+
+    def get_voice_session(self, tenant_id: str, session_id: str) -> Optional[Dict[str, Any]]:
+        if not session_id:
+            return None
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT * FROM voice_sessions WHERE tenant_id=? AND id=?",
+                (tenant_id, session_id),
+            ).fetchone()
+        return self._decode(row) if row else None
+
+    def get_voice_session_by_external(
+        self, tenant_id: str, external_application: str, external_session_id: str
+    ) -> Optional[Dict[str, Any]]:
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT * FROM voice_sessions WHERE tenant_id=? AND external_application=?"
+                " AND external_session_id=?",
+                (tenant_id, external_application, external_session_id),
+            ).fetchone()
+        return self._decode(row) if row else None
+
+    def get_voice_session_by_call(self, tenant_id: str, call_id: str) -> Optional[Dict[str, Any]]:
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT * FROM voice_sessions WHERE tenant_id=? AND call_id=?",
+                (tenant_id, call_id),
+            ).fetchone()
+        return self._decode(row) if row else None
+
+    def update_voice_session(
+        self, tenant_id: str, session_id: str, **fields: Any
+    ) -> Optional[Dict[str, Any]]:
+        allowed = {
+            "status",
+            "call_id",
+            "transcript",
+            "provider",
+            "simulated",
+            "webhook_url",
+            "recording_url",
+            "recording_sid",
+            "voice_boost",
+        }
+        updates = [(key, value) for key, value in fields.items() if key in allowed]
+        if not updates:
+            return self.get_voice_session(tenant_id, session_id)
+        setters = ", ".join(f"{key}=?" for key, _ in updates)
+        params: List[Any] = []
+        for key, value in updates:
+            params.append(json.dumps(value) if key in ("transcript", "voice_boost") else value)
+        params += [iso(), tenant_id, session_id]
+        with self._write() as connection:
+            connection.execute(
+                f"UPDATE voice_sessions SET {setters}, updated_at=? WHERE tenant_id=? AND id=?",
+                params,
+            )
+        return self.get_voice_session(tenant_id, session_id)
+
+    def update_voice_session_metadata(
+        self, tenant_id: str, session_id: str, patch: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """JSON-merge a patch into `session_metadata` under the write lock."""
+        with self._write() as connection:
+            row = connection.execute(
+                "SELECT session_metadata FROM voice_sessions WHERE tenant_id=? AND id=?",
+                (tenant_id, session_id),
+            ).fetchone()
+            if row is None:
+                raise LookupError("voice session not found")
+            # Row shapes differ per backend: dict rows (Postgres) vs tuple rows (SQLite).
+            raw = row.get("session_metadata") if isinstance(row, dict) else row[0]
+            merged = {**(json.loads(raw or "{}")), **patch}
+            connection.execute(
+                "UPDATE voice_sessions SET session_metadata=?, updated_at=? WHERE tenant_id=? AND id=?",
+                (json.dumps(merged), iso(), tenant_id, session_id),
+            )
+        return merged
+
+    def record_voice_session_event(
+        self,
+        tenant_id: str,
+        session_id: str,
+        event_type: str,
+        data: Optional[Dict[str, Any]] = None,
+        occurred_at: Optional[str] = None,
+        event_version: str = "1.0",
+    ) -> Dict[str, Any]:
+        event_id = new_id("vxe")
+        occurred = occurred_at or iso()
+        with self._write() as connection:
+            connection.execute(
+                "INSERT INTO voice_session_events (id, tenant_id, session_id, event_type,"
+                " event_version, occurred_at, data)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (event_id, tenant_id, session_id, event_type, event_version, occurred, json.dumps(data or {})),
+            )
+        return {
+            "event_id": event_id,
+            "event_type": event_type,
+            "event_version": event_version,
+            "occurred_at": occurred,
+            "session_id": session_id,
+            "data": data or {},
+        }
+
+    def list_voice_session_events(self, tenant_id: str, session_id: str) -> List[Dict[str, Any]]:
+        with self._read() as connection:
+            rows = connection.execute(
+                "SELECT * FROM voice_session_events WHERE tenant_id=? AND session_id=?"
+                " ORDER BY occurred_at ASC",
+                (tenant_id, session_id),
+            ).fetchall()
+        return [self._decode(row) for row in rows]
+
+    def create_session_instruction(
+        self, tenant_id: str, session_id: str, values: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Idempotent instruction intake; returns the row (created or existing)."""
+        with self._write() as connection:
+            cursor = connection.execute(
+                "INSERT INTO voice_session_instructions (id, tenant_id, session_id,"
+                " instruction_id, type, text, priority, status, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, 'received', ?)"
+                " ON CONFLICT(session_id, instruction_id) DO NOTHING",
+                (
+                    new_id("vxi"),
+                    tenant_id,
+                    session_id,
+                    values["instruction_id"],
+                    values["type"],
+                    values["text"],
+                    values.get("priority", "normal"),
+                    iso(),
+                ),
+            )
+            if cursor.rowcount == 0:
+                with self._read() as connection:
+                    row = connection.execute(
+                        "SELECT * FROM voice_session_instructions WHERE session_id=? AND instruction_id=?",
+                        (session_id, values["instruction_id"]),
+                    ).fetchone()
+                return self._decode(row) if row else None
+            row = connection.execute(
+                "SELECT * FROM voice_session_instructions WHERE session_id=? AND instruction_id=?",
+                (session_id, values["instruction_id"]),
+            ).fetchone()
+        return self._decode(row) if row else None
+
+    def list_session_instructions(self, tenant_id: str, session_id: str) -> List[Dict[str, Any]]:
+        with self._read() as connection:
+            rows = connection.execute(
+                "SELECT * FROM voice_session_instructions WHERE tenant_id=? AND session_id=?"
+                " ORDER BY created_at ASC",
+                (tenant_id, session_id),
+            ).fetchall()
+        return [self._decode(row) for row in rows]
+
+    def mark_session_instruction_spoken(self, tenant_id: str, session_id: str, instruction_id: str) -> None:
+        """Durably mark an instruction spoken so a fresh engine never re-drains it."""
+        with self._write() as connection:
+            connection.execute(
+                "UPDATE voice_session_instructions SET status='spoken'"
+                " WHERE tenant_id=? AND session_id=? AND instruction_id=? AND status='received'",
+                (tenant_id, session_id, instruction_id),
+            )
+
+    def record_event_delivery(
+        self,
+        tenant_id: str,
+        event_id: str,
+        session_id: str,
+        attempt: int,
+        ok: bool,
+        detail: Optional[str],
+    ) -> None:
+        with self._write() as connection:
+            connection.execute(
+                "INSERT INTO voice_session_deliveries (id, tenant_id, event_id, session_id,"
+                " attempt, ok, detail, at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (new_id("vxd"), tenant_id, event_id, session_id, attempt, int(ok), detail, iso()),
+            )
+
+    def list_event_deliveries(self, tenant_id: str, event_id: str) -> List[Dict[str, Any]]:
+        with self._read() as connection:
+            rows = connection.execute(
+                "SELECT * FROM voice_session_deliveries WHERE tenant_id=? AND event_id=?"
+                " ORDER BY attempt ASC",
+                (tenant_id, event_id),
+            ).fetchall()
+        return [self._decode(row) for row in rows]
+
+    def upsert_voice_session_checkpoint(
+        self,
+        tenant_id: str,
+        session_id: str,
+        transcript: Any,
+        flushed_at: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Durable verbatim transcript checkpoint, one row per (tenant, session)."""
+        at = flushed_at or iso()
+        payload = json.dumps(transcript)
+        with self._write() as connection:
+            connection.execute(
+                "INSERT INTO voice_session_checkpoints (id, tenant_id, session_id,"
+                " transcript, flushed_at)"
+                " VALUES (?, ?, ?, ?, ?)"
+                " ON CONFLICT(tenant_id, session_id) DO UPDATE SET transcript=?,"
+                " flushed_at=?",
+                (new_id("vxc"), tenant_id, session_id, payload, at, payload, at),
+            )
+        # RETURNING-equivalent read keeps sqlite/postgres symmetry.
+        checkpoint = self.get_voice_session_checkpoint(tenant_id, session_id)
+        if checkpoint is None:  # contract: the row exists directly after the upsert
+            raise RuntimeError("voice session checkpoint row vanished after upsert")
+        return checkpoint
+
+    def get_voice_session_checkpoint(
+        self, tenant_id: str, session_id: str
+    ) -> Optional[Dict[str, Any]]:
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT * FROM voice_session_checkpoints WHERE tenant_id=? AND session_id=?",
+                (tenant_id, session_id),
+            ).fetchone()
+        return self._decode(row) if row else None
+
     # --------------------------------------------------------------- campaigns
     def create_campaign(self, tenant_id: str, values: Dict[str, Any]) -> Dict[str, Any]:
         campaign_id = new_id("campaign")
@@ -607,8 +1592,9 @@ class Database:
             connection.execute(
                 "INSERT INTO campaigns (id, tenant_id, name, agent_id, crm_connection_id, status,"
                 " dry_run, schedule_at, calling_window_start, calling_window_end, timezone,"
-                " max_concurrency, max_attempts, retry_backoff_seconds, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " max_concurrency, max_attempts, retry_backoff_seconds, created_at, updated_at,"
+                " audience_source, audience_id, audience_version)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     campaign_id,
                     tenant_id,
@@ -626,6 +1612,9 @@ class Database:
                     int(values.get("retry_backoff_seconds", 30)),
                     now,
                     now,
+                    values.get("audience_source"),
+                    values.get("audience_id"),
+                    values.get("audience_version"),
                 ),
             )
         return self.get_campaign(tenant_id, campaign_id)  # type: ignore[return-value]
@@ -796,9 +1785,11 @@ class Database:
         now = iso()
         claimed: List[Dict[str, Any]] = []
         with self._write() as connection:
+            self._claim_prelude(connection)
             campaigns = connection.execute(
                 "SELECT * FROM campaigns WHERE status='running'"
-                " AND (schedule_at IS NULL OR schedule_at <= ?) ORDER BY created_at ASC",
+                " AND (schedule_at IS NULL OR schedule_at <= ?) ORDER BY created_at ASC"
+                + self._claim_row_lock(),
                 (now,),
             ).fetchall()
             for campaign in campaigns:
@@ -818,18 +1809,28 @@ class Database:
                     " FROM campaign_recipients r JOIN contacts c ON c.id=r.contact_id"
                     " WHERE r.campaign_id=? AND r.status='queued'"
                     " AND (r.next_attempt_at IS NULL OR r.next_attempt_at <= ?)"
-                    " ORDER BY r.created_at ASC LIMIT ?",
+                    " ORDER BY r.created_at ASC LIMIT ?"
+                    + self._claim_row_lock(),
                     (campaign["id"], now, slots),
                 ).fetchall()
                 for recipient in recipients:
                     attempt = int(recipient["attempts"]) + 1
                     idempotency_key = f"{campaign['id']}:{recipient['contact_id']}:{attempt}"
                     call_id = new_id("call")
-                    connection.execute(
+                    claim_update = connection.execute(
                         "UPDATE campaign_recipients SET status='dialing', attempts=?, updated_at=?"
                         " WHERE id=? AND status='queued'",
                         (attempt, now, recipient["id"]),
                     )
+                    # rowcount guard (roadmap M4a): another worker may have
+                    # claimed this recipient between our SELECT and UPDATE
+                    # (READ COMMITTED on Postgres has no writer
+                    # serialization; SQLite's BEGIN IMMEDIATE usually
+                    # serializes us, this is defense in depth there). A
+                    # 0-row update means we lost the race — skip without
+                    # touching calls/call_events.
+                    if getattr(claim_update, "rowcount", 1) != 1:
+                        continue
                     connection.execute(
                         "INSERT INTO calls (id, tenant_id, campaign_id, recipient_id, contact_id,"
                         " provider, status, direction, simulated, attempt, idempotency_key,"
@@ -866,6 +1867,17 @@ class Database:
                     item["campaign"] = self._decode(campaign)
                     claimed.append(item)
         return claimed
+
+    # Multi-worker claiming hooks (roadmap M4a): SQLite serializes writers
+    # with BEGIN IMMEDIATE, so the defaults are no-ops; Postgres overrides
+    # both — an advisory transaction lock to serialize slot accounting and
+    # FOR UPDATE SKIP LOCKED so concurrent workers never block on rows
+    # another worker is claiming.
+    def _claim_prelude(self, connection: sqlite3.Connection) -> None:
+        return None
+
+    def _claim_row_lock(self) -> str:
+        return ""
 
     def get_recipient(self, tenant_id: str, recipient_id: str) -> Optional[Dict[str, Any]]:
         with self._read() as connection:
@@ -990,9 +2002,44 @@ class Database:
                         )
                     else:
                         connection.execute(
-                            "UPDATE campaign_recipients SET status='failed', last_error=?, updated_at=?"
-                            " WHERE id=?",
+                            "UPDATE campaign_recipients SET status='failed', last_error=?, updated_at=?",
                             ("Recovered after worker restart", now, recipient["id"]),
+                        )
+                # Voice-session calls: the session row must follow the call
+                # — an in-flight live session whose call is force-failed at
+                # restart terminates with a versioned event (sole-writer
+                # consistency), it never stays in_flight on a dead call.
+                voice_session = connection.execute(
+                    "SELECT id, status FROM voice_sessions WHERE tenant_id=? AND call_id=?",
+                    (call["tenant_id"], call["id"]),
+                ).fetchone()
+                if voice_session is not None:
+                    session_status = (
+                        voice_session["status"]
+                        if isinstance(voice_session, dict)
+                        else voice_session[1]
+                    )
+                    if session_status not in ("completed", "failed", "terminated", "busy", "no_answer"):
+                        session_id = (
+                            voice_session["id"]
+                            if isinstance(voice_session, dict)
+                            else voice_session[0]
+                        )
+                        connection.execute(
+                            "UPDATE voice_sessions SET status='failed', updated_at=? WHERE id=?",
+                            (now, session_id),
+                        )
+                        connection.execute(
+                            "INSERT INTO voice_session_events (id, tenant_id, session_id,"
+                            " event_type, event_version, occurred_at, data)"
+                            " VALUES (?, ?, ?, 'voice_session.failed', '1.0', ?, ?)",
+                            (
+                                new_id("vxe"),
+                                call["tenant_id"],
+                                session_id,
+                                now,
+                                json.dumps({"reason": "worker_restart"}),
+                            ),
                         )
                 recovered += 1
             # A recipient can be marked dialing without a call row if the process
@@ -1013,9 +2060,126 @@ class Database:
                     (target, now, "Recovered after worker restart", now, orphan["id"]),
                 )
                 recovered += 1
+            # Batch items claimed by a dead worker are retryable: the item's
+            # provider call may never have reached the provider, so the job
+            # returns to `queued` with only those items requeued.
+            stranded = connection.execute(
+                "SELECT id FROM audio_batch_items WHERE status='processing'"
+            ).fetchall()
+            for item in stranded:
+                connection.execute(
+                    "UPDATE audio_batch_items SET status='queued', next_attempt_at=?, error=?,"
+                    " updated_at=? WHERE id=?",
+                    (now, "Recovered after worker restart", now, item["id"]),
+                )
+                recovered += 1
+            connection.execute(
+                "UPDATE audio_batch_jobs SET status='queued', updated_at=?"
+                " WHERE status='processing' AND EXISTS (SELECT 1 FROM audio_batch_items i"
+                " WHERE i.batch_id=audio_batch_jobs.id AND i.status='queued')",
+                (now,),
+            )
         return recovered
 
     # ------------------------------------------------------------------- calls
+    def get_contact_by_phone(self, phone: str, tenant_id: str) -> Optional[Dict[str, Any]]:
+        """Consent lives with the phone, not the provider namespace."""
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT * FROM contacts WHERE tenant_id=? AND phone=? ORDER BY updated_at DESC",
+                (tenant_id, phone),
+            ).fetchone()
+        return self._decode(row) if row else None
+
+    def create_voice_call(
+        self,
+        tenant_id: str,
+        session_id: str,
+        contact_id: str,
+        settings: Any,
+        agent_id: str,
+    ) -> Dict[str, Any]:
+        """Session-sourced call row (campaign column carries the session id)."""
+        call_id = new_id("call")
+        idempotency_key = f"vxs:{session_id}:1"
+        simulated = settings.telephony_provider != "twilio" or not settings.allow_live_calls
+        now = iso()
+        with self._write() as connection:
+            connection.execute(
+                "INSERT INTO calls (id, tenant_id, campaign_id, recipient_id, contact_id,"
+                " provider, status, direction, simulated, attempt, idempotency_key,"
+                " created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, 'queued', 'outbound', ?, 1, ?, ?, ?)",
+                (
+                    call_id,
+                    tenant_id,
+                    session_id,
+                    contact_id,
+                    contact_id,
+                    settings.telephony_provider,
+                    int(bool(simulated)),
+                    idempotency_key,
+                    now,
+                    now,
+                ),
+            )
+        self.add_call_event(tenant_id, call_id, "queued", data={"idempotencyKey": idempotency_key})
+        call = self.get_call(tenant_id, call_id)
+        if call is None:  # caller contract: the row exists right after insert
+            raise RuntimeError("voice call row vanished after insert")
+        return call
+
+    def apply_voice_session_result(self, tenant_id: str, call_id: str, result: Any) -> None:
+        """Apply a telephony result to a session call row (no recipient fans-out)."""
+        for event in result.events:
+            self.add_call_event(tenant_id, call_id, event.event_type, event.at, event.data)
+        # Mirror provider progress events onto the session envelope honestly.
+        session = self.get_voice_session_by_call(tenant_id, call_id)
+        if session is not None:
+            mirrored = {
+                "dialing": "voice_session.ringing",
+                "ringing": "voice_session.ringing",
+                "in_progress": "voice_session.in_progress",
+                "answered": "voice_session.answered",
+            }
+            for event in result.events:
+                session_event = mirrored.get(event.event_type)
+                if session_event:
+                    self.record_voice_session_event(
+                        tenant_id, session["id"], session_event, dict(event.data)
+                    )
+        if not getattr(result, "final", True):
+            self.update_call(
+                tenant_id,
+                call_id,
+                target="dialing",
+                provider=result.provider,
+                provider_call_id=result.provider_call_id,
+                started_at=result.started_at,
+            )
+            return
+        for stage, duration in result.latency_ms.items():
+            self.add_latency(tenant_id, call_id, stage, duration, result.simulated)
+        fields: Dict[str, Any] = {
+            "provider": result.provider,
+            "provider_call_id": result.provider_call_id,
+            "ended_at": result.ended_at,
+            "disposition": result.disposition,
+        }
+        if result.ok and result.status == "completed":
+            fields.update(answered_at=result.answered_at, duration_ms=result.duration_ms)
+            self.update_call(tenant_id, call_id, target="completed", **fields)
+            return
+        target_map = {
+            "no_answer": "no_answer",
+            "busy": "busy",
+        }
+        target = target_map.get(result.status, "failed")
+        if result.error_code:
+            fields["error_code"] = result.error_code
+        fields["error_message"] = result.error_message
+        self.update_call(tenant_id, call_id, target=target, **fields)
+
     def get_call(self, tenant_id: str, call_id: str) -> Optional[Dict[str, Any]]:
         with self._read() as connection:
             row = connection.execute(
@@ -1188,6 +2352,53 @@ class Database:
             }
         return summary
 
+    def metrics_snapshot(self) -> Dict[str, Any]:
+        """Cross-tenant aggregates for the Prometheus /metrics endpoint (M4c).
+
+        Read-only and tenant-agnostic: scrape-time aggregates over all
+        rows, not a tenant view. Latency quantiles are computed in Python
+        so SQLite and Postgres behave identically.
+        """
+        with self._read() as connection:
+            campaigns = connection.execute(
+                "SELECT status, COUNT(*) AS n FROM campaigns GROUP BY status"
+            ).fetchall()
+            calls = connection.execute(
+                "SELECT status, COUNT(*) AS n FROM calls GROUP BY status"
+            ).fetchall()
+            sessions = connection.execute(
+                "SELECT status, COUNT(*) AS n FROM voice_sessions GROUP BY status"
+            ).fetchall()
+            queue_depth = connection.execute(
+                "SELECT COUNT(*) AS n FROM campaign_recipients WHERE status='queued'"
+            ).fetchone()["n"]
+            active_calls = connection.execute(
+                "SELECT COUNT(*) AS n FROM calls"
+                " WHERE status IN ('queued','dialing','ringing','in_progress')"
+            ).fetchone()["n"]
+            latency_rows = connection.execute(
+                "SELECT stage, duration_ms FROM call_latency"
+            ).fetchall()
+        grouped: Dict[str, List[float]] = {}
+        for row in latency_rows:
+            grouped.setdefault(row["stage"], []).append(float(row["duration_ms"]))
+        latency: Dict[str, Dict[str, Any]] = {}
+        for stage, values in grouped.items():
+            values.sort()
+            latency[stage] = {
+                "count": len(values),
+                "p50": _percentile(values, 50),
+                "p95": _percentile(values, 95),
+            }
+        return {
+            "campaigns": {row["status"]: int(row["n"]) for row in campaigns},
+            "calls": {row["status"]: int(row["n"]) for row in calls},
+            "voice_sessions": {row["status"]: int(row["n"]) for row in sessions},
+            "queue_depth": int(queue_depth),
+            "active_calls": int(active_calls),
+            "latency": latency,
+        }
+
     def overview(self, tenant_id: str) -> Dict[str, Any]:
         with self._read() as connection:
             campaigns = connection.execute(
@@ -1240,14 +2451,15 @@ class Database:
         api_key_encrypted: str,
         webhook_secret_encrypted: Optional[str],
         capabilities: Dict[str, Any],
+        config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         connection_id = new_id("crm")
         now = iso()
         with self._write() as connection:
             connection.execute(
                 "INSERT INTO crm_connections (id, tenant_id, provider, name, base_url,"
-                " api_key_encrypted, webhook_secret_encrypted, status, capabilities, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, 'untested', ?, ?, ?)",
+                " api_key_encrypted, webhook_secret_encrypted, status, capabilities, config, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, 'untested', ?, ?, ?, ?)",
                 (
                     connection_id,
                     tenant_id,
@@ -1257,6 +2469,7 @@ class Database:
                     api_key_encrypted,
                     webhook_secret_encrypted,
                     json.dumps(capabilities),
+                    json.dumps(config or {}),
                     now,
                     now,
                 ),

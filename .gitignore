@@ -17,3 +17,5 @@ target/
 .DS_Store
 *.log
 .vite/
+*.egg-info/
+data/

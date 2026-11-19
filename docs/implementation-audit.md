@@ -171,3 +171,313 @@ $ PYTHONPATH=services/orchestrator/src:services/ai-runtime/src .venv/bin/python 
 - **Honest boundary:** no live-server verification — no Twilio credentials in this environment; dialing additionally requires `VOXORA_ALLOW_LIVE_CALLS=true` (refused otherwise, tested). Provider status reports Twilio `implemented: true, configured: false, live: false` in the default dev setup.
 - Config: `VOXORA_TELEPHONY_PROVIDER=twilio` now requires all of `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`, `TWILIO_TWIML_URL`, `TWILIO_STATUS_CALLBACK_URL` (validated at startup).
 - Suite: 129 Python tests green (both storage backends), ruff + mypy clean, Rust 17 green.
+
+## M7 + M8 completion (2026-11-12, verified this session)
+
+Branch `feature/voice-intelligence`; plan
+`docs/superpowers/plans/2026-11-12-m7-m8-live-loop-routing-analytics.md`.
+
+- **P8 model-profile dispatch**: `/api/v1/ai/decide` resolves
+  (profile, task) → model from the seeded `model_profiles` table; unknown
+  profile ⇒ 501 with the configured list; `ai_usage` rows persist per
+  (tenant, profile, task, model) for decide (analyze) and the live turn
+  loop (turn). Verified: `tests/test_model_profiles.py` (13 tests, SQLite +
+  Postgres).
+- **M7 live turn loop**: `voice-runtime` sessions open in-flight
+  (agent opening line spoken); `POST /voice-sessions/{id}/turns` drives
+  STT deltas → agent turn → spoken segments; mid-call instructions are
+  spoken at the stream boundary (`source: "instruction"`); end keyword
+  settles `completed` + `transcript.ready`; budget counters persist across
+  requests via `completed_turns`/`resumed` engine params; agents gained
+  `rearm()` (OpenRouterAgent re-arms WITHOUT spending an LLM call).
+  Verified: `tests/test_voice_turn_loop_http.py` (13 tests).
+- **P7 routing status**: `GET /api/v1/voice/providers` with literal
+  `UNVERIFIED` labels + `attemptable: false`; found and fixed a real
+  shared-mutable-singleton defect in `LanguageRoutingTable` quirks.
+  Verified: `tests/test_voice_providers.py` (12 tests).
+- **P9 server-authoritative TTS**: pinned by tests — no arbitrary-text TTS
+  route; caller deltas never appear in spoken content; instruction cap 2000.
+- **P10 speech analytics**: deterministic pause/WPM/filler estimates
+  computed once at settle when recorded audio is fetchable (stdlib WAV
+  decoder; ffmpeg absent by ruling); omitted honestly without audio.
+  Verified: `tests/test_voice_analytics.py` (8 tests, both backends).
+- Two real defects fixed along the way: Postgres never received the
+  `voice_sessions.recording_url/recording_sid` columns (migration parity
+  with the SQLite hook), and `conftest._PG_TABLES` truncated neither
+  `voice_sessions` nor several newer tables (stale-row leakage).
+
+Full suite this session: 247 orchestrator tests + 20 ai-runtime tests
+green (SQLite + Postgres); ruff clean; mypy: 3 pre-existing
+import-untyped notes on third-party modules (voxora_voice_runtime,
+pyreverseetl) unchanged. Not verified live: no real telephony, no real
+LLM, no live Squid — unchanged honest boundaries.
+
+## M9 Voice Boost settings surface (2026-11-13, verified this session)
+
+Plan `docs/superpowers/plans/2026-11-13-voice-boost-settings.md`.
+
+- **Rust seam** (`crates/voice-runtime/src/dsp.rs::config_from_settings_json`
+  + pybridge `voice_boost_config_from_json`): the orchestrator-facing
+  `{"enabled", "profile", "overrides"}` document resolves into a
+  `VoiceBoostConfig` — unknown profiles/keys, wrong types, and out-of-range
+  numbers rejected (never clamped); `enabled: false` ⇒ bypass with overrides
+  resolved-inert. Verified: 4 new dsp tests + pybridge round-trip
+  (cargo 115 green); the function is proven through the REAL extension via
+  the maturin-built wheel (`make py-voice`), not mocks.
+  Honest note: `cargo test --features pyo3-bindings` cannot link in this
+  environment (extension-module feature) — compile is verified with
+  `cargo check --features pyo3-bindings`, function behavior via the wheel.
+- **Storage**: `voice_boost_settings` config-in-db table (profile + enabled
+  master switch + overrides config; seed-once builtin CLEAR/enabled) plus a
+  per-session `voice_boost` override column on `voice_sessions`; parity
+  migrations for both backends (a shared persistent Postgres server exposed
+  the schema-upgrade gap and got the `enabled` migration).
+- **Resolution**: `voice_boost.py::resolve_voice_boost_settings` merges
+  stored global defaults with the current session override only — session
+  overrides never persist into global defaults (tested).
+- **API**: `GET/PUT /api/v1/voice/boost/settings` (PUT writer-gated, audited
+  `voice_boost.settings_updated`; validation 422s pinned: unknown control
+  key, out-of-range strengths/target, unknown profile), and per-session
+  `voice_boost` override on `POST /api/v1/voice-sessions` resolved in the
+  session view (`profile` inherited, `overrides` merged).
+- **Seam tests**: `tests/test_voice_boost_seam.py` (3 tests) drive the real
+  extension — settings resolve, disabled ⇒ Rust bypass, API-rejected input
+  rejected identically at the seam.
+- Honest boundary: the DSP executes inside the Rust media engine (tested
+  there); live-call application waits on the M7 media transport. The M7/P9
+  contract stands: `/voice-sessions/{id}/say` stays 404; no client-controlled
+  call speech.
+
+Full suite this session: 295 orchestrator tests green (SQLite + Postgres),
+ruff + mypy clean, cargo 115 green both verification paths.
+
+## M10 Audio Generation, Phases A-B (2026-11-13, verified this session)
+
+What shipped (the PRODUCE half of the M9+M10 voice pipeline — the operator-asset
+surface, deliberately separate from the live call path):
+
+- **Provider abstraction** (`tts_generation.py`): `TTSProvider` protocol with two
+  implementations — `MockTTSProvider` (deterministic sine WAV, honestly labeled
+  `simulated: true`; the in-repo simulation engine, zero paid API calls) and
+  `OpenAITTSProvider` implemented against the DOCUMENTED REST contract
+  (`POST /v1/audio/speech` — developers.openai.com, retrieved 2026-11-13) with
+  injectable transport and fake-transport tests. Contract-verified,
+  LIVE-UNVERIFIED: no credentials exist in this environment. The provider
+  exposes exactly the documented surface (13 voices, `tts-1|tts-1-hd|
+  gpt-4o-mini-tts`, 6 formats, speed 0.25-4.0); `instructions` only on
+  gpt-4o-mini-tts (refused at the model layer, dropped at the provider layer).
+  OpenAI exposes NO language-selection parameter — language is recorded
+  metadata only. Provider errors are sanitized: detail never carries the key
+  or reaches clients.
+- **Storage + validation** (`audio_assets.py`): paths built ONLY from internal
+  ids (no user input ever reaches a path; id regex-validated), 50MB blob cap,
+  WAV duration via stdlib `wave` (no-ffmpeg ruling stands) — compressed formats
+  report `duration_seconds: None`, never zero-fabricated. Provider failure
+  leaves NO row and NO file behind (tested). Download headers are sanitized
+  against hostile titles (quotes/CR/LF/path chars).
+- **Persistence**: `audio_assets` table on BOTH backends (parity migrations),
+  `parent_asset_id` + `processing_history` columns exist NOW for Phase C
+  variants; title search is `LOWER(title) LIKE LOWER(?)` for cross-backend
+  case-insensitivity (Postgres LIKE is case-sensitive, SQLite is not).
+- **API**: `POST /api/v1/audio-assets/generate` (writer-gated, 201; unconfigured
+  provider → 501 `audio_provider_unconfigured`, provider refusal → 502
+  sanitized), `GET /api/v1/audio-assets` (repo `_page` convention), `GET
+  .../audio-assets/{id}`, `GET .../download` (sanitized Content-Disposition),
+  `DELETE .../{id}` (row + file, audited), and `GET /api/v1/audio/providers`
+  mirroring the voice_providers capability-honesty pattern (never fakes
+  success; unconfigured returns an honest body, 501 only at generate time).
+- **The M7/P9 boundary stands**: `/voice-sessions/{id}/say` stays 404 (pinned
+  in `test_audio_api.py`). Generated audio never enters the call loop.
+
+Verified this session: `test_tts_generation.py` (11) + `test_audio_assets.py`
+(22, SQLite + Postgres) + `test_audio_api.py` (6) — full suite 356 green,
+ruff clean, mypy clean apart from the pre-existing pyreverseetl
+import-untyped note. At that point Phases C-G (variants/post-processing, script
+chunking + long-form, batch/background jobs) were still planned; their shipped
+state is recorded in the later sections below.
+
+## M10 Audio Generation, Phase C — non-destructive variants (2026-11-13, verified this session)
+
+The PRODUCE-half finishing pass: operators derive optional variants from a
+generated WAV asset, reusing the M9 DSP so ONE engine serves both directions
+of the pipeline (calls enhanced on the way in, assets enhanced on the way out).
+
+- **Real resampler (new Rust DSP)**: `crates/voice-runtime/src/resample.rs` —
+  whole-buffer Hann-windowed sinc, arbitrary ratios (8k–48k), cutoff
+  0.45×min(in,out), single DC-gain norm on the input grid. Verified by
+  sine-sweep tests (amplitude ±2%, zero-crossing frequency within 2%,
+  ratio frame counts). Two kernel bugs were caught BY the tests (per-position
+  renormalization exploded 870×; an inverted window zeroed the main lobe) —
+  the RED→GREEN loop earned its keep.
+- **Offline post-process seam**: `postprocess.rs` + pyfunction
+  `audio_postprocess(samples, ops_json, rate)` — normalize (pure gain,
+  clip-guarded: gain REDUCED rather than clipping, `target_reached` honest;
+  within the API's ≤ -6 dBFS target range clipping is mathematically
+  impossible and the test pins that) and voice_boost (the SAME
+  `VoiceBoostStage` M9 uses, with the documented 16 kHz internal round-trip
+  for non-16k assets — duration preserved ±1%, recorded in diagnostics).
+  9 new Rust tests; 131 total green; `cargo check --features pyo3-bindings`
+  compiles; seam verified through the REAL wheel (`make py-voice`).
+- **Variant engine** (`variants.py`): WAV I/O via stdlib `wave` (16-bit
+  mono/stereo only — honest 422 for compressed/non-16-bit parents, never
+  misread bytes); trim_silence (amplitude-threshold scan, everything-quiet →
+  422) and channel conversion (mean-mix with clip guard) in Python; variants
+  written as full WAV containers; variant-of-variant chains allowed with
+  accumulating `processing_history` (op, params, diagnostics, at, by).
+- **API**: `POST /api/v1/audio-assets/{id}/variants` (writer-gated, 201,
+  audited `audio.variant_created`; 1–6 ops, extra=forbid, voice_boost+stereo
+  combo refused 422; ValueError→422 `variant_invalid`, RuntimeError→503
+  `audio_engine_unavailable` — the extension is REQUIRED, never faked),
+  `GET .../variants` (`_page` shape). The parent file is only ever READ —
+  byte-identity pinned by test at both the engine and HTTP layer.
+- Honest boundaries: WAV-16-bit parents only this phase; no compressed decode;
+  voice_boost mono-only (stereo → 422); variant voice_boost resolves the op's
+  own params over the builtin profile (tenant stored settings never consulted
+  — a stored `enabled: false` silently no-opping an explicit op would be a
+  fake success); op-params ride the M9 override validation (ranges refused,
+  never clamped).
+
+Verified this session: orchestrator suite 392 green (SQLite + Postgres),
+ruff clean, mypy clean (repo config), cargo 131 green. At that point Phase D
+(long-form chunking) and Phase E (batch/background) were still planned; both
+shipped later, as recorded below.
+
+## M10 Audio Generation, Phase D — long-form generation (2026-11-13, verified this session)
+
+What shipped (long-form: scripts far beyond the provider's 4096-char limit
+become ONE assembled asset, with per-chunk honesty and retry-without-
+regeneration):
+- **Chunker** (`longform.py`): paragraph-boundary chunking (blank lines),
+  sentence-boundary fallback for paragraphs over the limit, word-boundary
+  hard split as documented last resort; greedy merge up to `max_chunk_chars`
+  (default 4096, range 500-4096); 64-chunk cap (422 with the actual count);
+  chunk texts concatenate back to the script verbatim (pinned by test).
+- **Run engine** (`longform.py`): `generate_long_form` creates the row
+  immediately (`status: processing`, real final storage_path, file_size 0,
+  duration None), then generates each chunk through the EXISTING provider
+  abstraction with ONE settings set — chunk intermediates are files
+  (`{asset_id}_chunk_{i}.{ext}`), never asset rows (kept out of the operator
+  library by design). Manifest lives in `processing_history`: header entry
+  (`kind: longform`, run_id, FULL settings snapshot incl. `instructions`,
+  max_chunk_chars) + per-chunk entries (text verbatim, state, sanitized
+  error) + `assembled`/`assembly_failed` entries. Assembly: WAV concat is
+  frame-exact with rate/channels equality enforced, PCM raw concat with
+  honest duration None; assembled blob validated (50 MB cap) and frame count
+  asserted == sum of chunk frames; chunk files removed after successful
+  assembly. Any chunk failure → row stays `processing` (succeeded chunks
+  kept); assembly failure → terminal `failed` with a message naming the
+  remedy (shorter script). In-process `run_locks` guard double-runs.
+- **Retry** (`retry_long_form` + `POST /api/v1/audio-assets/{id}/retry-
+  failed`): validates long-form header + status + lock (409 `run_in_flight`,
+  non-long-form/terminal → 409 `longform_invalid`), regenerates ONLY
+  failed/missing chunks from the STORED snapshot (retry uses byte-identical
+  chunk text and identical settings — pinned by tests: exactly one extra
+  provider call, boundaries unchanged), then re-assembles.
+- **API**: `POST /api/v1/audio-assets/generate-long` (writer-gated, 201 even
+  on partial failure — the body carries `processing` status and the failed
+  chunk; script ≤ 262 144 chars; ValueError→422 `longform_invalid`),
+  lifecycle guards: download of a `processing` asset → 409
+  `still_processing` (never a misleading 404), variant of a non-`ready`
+  asset → 422; DELETE removes the assembled file AND all chunk files.
+  Audited `audio.longform_completed`.
+- Honest boundaries: synchronous request bounded by the 64-chunk cap (long
+  scripts are long requests — Phase E adds background processing);
+  WAV/PCM assembly only (no in-repo decoder for compressed formats, same
+  ruling as variants); run lock is per-process (single-worker deployment —
+  multi-worker would need a shared lease, documented not hidden); max legal
+  input can exceed the 50 MB assembled cap → terminal `failed` with the
+  remedy in the message.
+
+Verified this session: orchestrator + ai-runtime suite 441 green (SQLite +
+Postgres), ruff clean, mypy clean (repo config). At that point Phase E
+(batch/background), Phase F (console UI), and Phase G were still planned; all
+three shipped later, as recorded below.
+
+Phase D whole-branch review (fresh reviewer, base 5481a44 → 28013a5) — fixed
+in commit 28013a5: (1) assembly catch broadened to
+`ValueError/wave.Error/EOFError/OSError` in BOTH run paths — a corrupt or
+missing chunk file now lands in terminal `failed` with a sanitized message
+instead of a 500 + permanently-stuck `processing` row; (2) run-lock
+check+add made atomic under a `threading.Lock` with a dedicated
+`RunInFlightError` (FastAPI threadpool could double-run retries on a bare
+membership test); lock is acquired inside `_check_runnable` before any
+other work and released on every path; (3) unconfigured provider now maps
+501 `audio_provider_unconfigured` on BOTH long-form routes (provider built
+at the API edge, matching the single-request route); dead
+`AudioGenerationError` catches removed. Also added: provider format-mismatch
+guard (a provider echoing a different format than requested honestly fails
+that chunk), softened chunker docstring (verbatim guarantee is
+paragraph-merge level; retry stability rests on stored texts, not source
+reconstruction). Deferred minors (not fixed, accepted): per-chunk manifest
+rewrites the full history JSON each chunk in the synchronous long-form HTTP
+route (the Phase E batch surface now runs long rows in the audio worker with a
+DB-level claim, but that HTTP route is unchanged); download of a `failed` asset is 404
+`file_missing` (spec pinned only `processing`); retry test asserts provider
+call-count rather than byte-identity (deliberately — stronger and
+implementation-agnostic).
+
+## M10 Audio Generation, Phases E-G (2026-11-20, verified this session)
+
+Phase E closes the batch half of the PRODUCE surface. Commit checkpoints:
+`c202bd1` (execution map), `40f121d` (batch backend), `64c9d89` (console).
+
+- **Persistence** (`db.py`, `models.py`): additive `audio_batch_jobs` and
+  `audio_batch_items` tables on SQLite + Postgres with JSON `defaults`/
+  `settings` columns, per-tenant scoping, row-level status/attempts/error/
+  rate-limited/next-attempt fields. New seams: `create_audio_batch`,
+  `get_audio_batch`, `list_audio_batches`, `list_audio_batch_items`,
+  `claim_audio_batch_items`, `complete_audio_batch_item`,
+  `retry_failed_audio_batch_items`; `recover_inflight()` also requeues stale
+  batch items and their jobs. Failed retries preserve `asset_id` so a partial
+  long-form run is completed, not regenerated from scratch (bug found and fixed
+  by the new test).
+- **Intake + worker** (`audio_batches.py`): CSV parser accepts
+  `script,title,voice,language,speed,model,response_format,instructions`
+  (`script` required), rejects unknown/duplicate headers, reports row-numbered
+  errors, applies defaults, fills a missing title, and routes long rows to the
+  existing `generate_long_form` engine (WAV/PCM only, as before). A 200-row cap
+  is configurable. `AudioBatchEngine` runs bounded claim cycles;
+  `BatchRateLimiter` spaces requests and backs off on 429s using injectable
+  clock/sleep. This is client-side behavior only — no provider quota is
+  claimed or simulated. `AudioBatchWorker` is a separate daemon thread started
+  from the API lifespan when `worker_enabled`; it never reuses the campaign
+  worker or touches the live call path.
+- **API** (`api.py`): `POST /api/v1/audio/batches/preview`,
+  `POST /api/v1/audio/batches`, `GET /api/v1/audio/batches`,
+  `GET /api/v1/audio/batches/{id}`, `POST /api/v1/audio/batches/process`,
+  `POST /api/v1/audio/batches/{id}/retry-failed`, and
+  `GET /api/v1/audio/batches/{id}/report` (CSV download). Multipart intake uses
+  the standard bearer auth, writer gating, tenant isolation, and audits
+  (`audio.batch_created`, `audio.batch_retried`); unconfigured provider → 501
+  `audio_provider_unconfigured`, no failed records → 409
+  `batch_no_failed_items`. The `/process` route runs ONE bounded cycle rather
+  than blocking until the batch completes.
+- **Tests** (`test_audio_batches.py`, `test_audio_batch_api.py`): 26 new tests
+  with `MockTTSProvider`, fail-once stubs, and injectable limiter time — CSV
+  validation/row errors, tenant isolation, writer gating, provider-boundary
+  pin, claim/process/report, retry-of-failed-only, partial long-form retry
+  reuse, and 501/409 error contracts. No paid API calls.
+
+Phase F adds the operator surface without redesigning the dashboard:
+`make ts-client` regenerated `apiTypes.ts`/`paths.ts` from OpenAPI; `api.ts`
+gained audio provider/generate/list/delete/download, batch preview/create/
+list/detail/process/retry/report methods, multipart upload, blob downloads,
+and error-code parsing; `AudioGeneration.tsx` adds Generate / Batch / Library /
+Processing / Settings inside a new `audio` tab. Provider banners explicitly say
+`Mock provider: simulated audio` or `No TTS provider configured` (generation
+disabled, 501), and warn when a live provider is configured. The console never
+injects produced audio into a live call; the M7/P9 `/voice-sessions/{id}/say`
+404 boundary is pinned beside the new surface.
+
+Phase G sweep: fixed the duplicated voice-boost test (ruff F811), the
+`test_longform_api.py` monkeypatch target, the CSV missing-title default bug,
+and the partial-asset retry bug noted above. Verification: `make verify`
+(lint, typecheck, pytest, web build, Rust tests), `468 passed in 53.89s`
+Python (SQLite + Postgres), `134 passed` Rust, console production build clean,
+ruff/mypy clean, and `graphify update .` rebuilt the graph. `system/info` now
+exposes only non-secret audio provider/batch settings (pinned by test) so the
+console Settings view is real, not decorative. Honest boundaries:
+the long-form HTTP route remains synchronous (bounded by the 64-chunk cap);
+batch long rows run in the dedicated worker; multi-worker deployments would
+need a shared lease; rate limits are approximate client-side pacing, not a
+provider contract; no live telephony or paid TTS path was exercised.

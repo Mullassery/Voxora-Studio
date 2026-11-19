@@ -2,25 +2,40 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, OrderedDict, Tuple
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
+from pydantic import ValidationError
 
 from . import __version__
+from .audio_assets import AudioFileStore, AudioGenerationError, generate_asset
+from .audio_batches import (
+    AudioBatchEngine,
+    AudioBatchWorker,
+    BatchCsvError,
+    batch_report_csv,
+    parse_batch_csv,
+)
 from .campaign import CampaignEngine, CampaignError
 from .config import Settings, TenantPrincipal
 from .crm import build_crm_adapter, provider_catalog
 from .crm.sync import sync_connection
 from .db import Database, database_from_settings, iso
+from .longform import RunInFlightError, generate_long_form, retry_long_form
 from .models import (
     AgentCreate,
+    AiDecideRequest,
+    AudienceImport,
+    AudioAssetGenerate,
+    AudioBatchDefaults,
     CampaignCreate,
     CampaignSyncRequest,
     ConsentUpdate,
@@ -28,16 +43,57 @@ from .models import (
     ContactImport,
     CrmConnectionCreate,
     CrmSyncRequest,
+    LongFormGenerate,
     MappingsUpdate,
     RecipientAdd,
+    SessionInstruction,
+    SttDeltas,
     SuppressionCreate,
+    TurnAgentEvent,
+    TurnAudioFrame,
+    TurnEngineCreate,
+    TurnLidReport,
+    TurnProviderFailure,
+    TurnSemanticReport,
+    TurnTranscript,
+    VariantOpsRequest,
+    VoiceBoostSettingsUpdate,
+    VoiceSessionCreate,
 )
 from .observability import configure_logging
 from .security import SecretBox, safe_equal
 from .seed import seed_demo
 from .state import InvalidTransition
 from .telephony import build_telephony_adapter, telephony_provider_status
+from .tts_generation import build_tts_provider
+from .voice_turn_detection import (
+    AGENT_EVENT_KINDS,
+    ENDPOINT_PROFILES,
+    SEMANTIC_VERDICTS,
+    TURN_SCHEMA_VERSION,
+    TurnDetectionEngine,
+    TurnDetectionError,
+)
+from .voice_turn_detection import (
+    engine_available as turn_engine_available,
+)
+from .voice_turn_detection import (
+    extension_version as turn_extension_version,
+)
 from .worker import CampaignWorker
+
+_TURN_EVENT_BUFFER_MAX = 512
+TURN_STATES = (
+    "idle", "listening", "speech_detected", "in_turn", "pending_end",
+    "turn_complete", "ai_thinking", "ai_speaking", "interruption_candidate",
+    "interrupted", "recovering", "ended",
+)
+TURN_EVENT_TYPES = (
+    "speech_started", "speech_ended", "endpoint_candidate", "turn_completed",
+    "turn_continued", "interruption_detected", "tts_cancelled",
+    "transcription_finalized", "turn_state_changed", "turn_timeout",
+    "provider_failed", "recovered", "rejected",
+)
 
 logger = logging.getLogger(__name__)
 SUPPORTED_CANONICAL_FIELDS = {
@@ -85,6 +141,117 @@ def now_iso() -> str:
     return iso()
 
 
+_MOCK_DECISION_FALLBACK = {
+    "next_action": "probe",
+    "question_text": "Could you tell me a bit more about that?",
+    "is_complete": False,
+    "evidence_updates": [],
+}
+
+
+def _mock_llm_decision(system_prompt: str, user_prompt: str) -> Dict[str, Any]:
+    """Deterministic development decision; declared as mock in the response."""
+    digest = hashlib.sha256(f"{system_prompt}:{user_prompt}".encode("utf-8")).digest()
+    action = ("probe", "clarify", "challenge", "move_on", "conclude")[digest[0] % 5]
+    return {
+        **_MOCK_DECISION_FALLBACK,
+        "next_action": action,
+        "is_complete": action == "conclude",
+    }
+
+
+_VOICE_SESSION_TERMINAL = {"completed", "busy", "no_answer", "failed", "terminated", "canceled"}
+
+
+def _telephony_capabilities(settings: Any) -> Dict[str, Any]:
+    """Capability honesty for the provider selected at start-up.
+
+    Contracts advertise what the CURRENT provider + transport can do; the
+    instruction contract returns provider-labeled reasons on 409 instead of
+    silently dropping instructions.
+    """
+    provider = settings.telephony_provider
+    if provider == "mock":
+        return {
+            "provider": provider,
+            "simulated": True,
+            "final_on_place": True,
+            "transcript": True,
+            "mid_call_instructions": False,
+            "message": "Mock adapter completes synchronously and cannot accept mid-call instructions.",
+        }
+    if provider == "voice-runtime":
+        return {
+            "provider": provider,
+            "simulated": True,
+            "final_on_place": True,
+            "transcript": True,
+            "mid_call_instructions": True,
+            "message": (
+                "Media backend with the live turn loop (M7): mid-call instructions "
+                "are spoken at the next stream boundary; STT/TTS remain deterministic "
+                "simulations the Rust MediaBridge mounts behind the MediaTransport seam."
+            ),
+        }
+    if provider == "twilio" and settings.allow_live_calls:
+        return {
+            "provider": provider,
+            "simulated": False,
+            "final_on_place": False,
+            "transcript": False,
+            "mid_call_instructions": False,
+            "message": "Twilio Live: statuses settle via callbacks; mid-call instructions need Twilio's speech modification API (not wired in this slice).",
+        }
+    return {
+        "provider": provider,
+        "simulated": True,
+        "final_on_place": False,
+        "transcript": False,
+        "mid_call_instructions": False,
+        "message": "Dry-run Twilio contract adapter.",
+    }
+
+
+def _voice_session_view(
+    app: FastAPI, principal: TenantPrincipal, session: Dict[str, Any]
+) -> Dict[str, Any]:
+    if not session:
+        raise ApiError(404, "Voice session not found", "unknown_session")
+    db: Database = app.state.db
+    call = db.get_call(principal.tenant_id, session["call_id"]) if session["call_id"] else None
+    events = db.list_voice_session_events(principal.tenant_id, session["id"])
+    from .voice_boost import resolve_voice_boost_settings
+
+    resolved_boost = resolve_voice_boost_settings(db, principal.tenant_id, session.get("voice_boost") or None)
+    return {
+        "session_id": session["id"],
+        "external_application": session["external_application"],
+        "external_session_id": session["external_session_id"],
+        "status": session["status"],
+        "agent_id": session["agent_id"],
+        "model_profile": session["model_profile"],
+        "provider": session["provider"],
+        "simulated": bool(session["simulated"]),
+        "transcript_available": bool(session["transcript"] or []),
+        "voice_boost": resolved_boost,
+        "call_id": session["call_id"],
+        "call_status": call["status"] if call else None,
+        "events": [
+            {
+                "event_id": event["id"],
+                "event_type": event["event_type"],
+                "event_version": event.get("event_version", "1.0"),
+                "occurred_at": event["occurred_at"],
+            }
+            for event in events
+        ],
+        "webhook_url": session["webhook_url"],
+        "session_metadata": session.get("session_metadata") or {},
+        "created_at": session["created_at"],
+        "updated_at": session["updated_at"],
+    }
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings: Settings = app.state.settings
@@ -104,18 +271,33 @@ async def lifespan(app: FastAPI):
         from_number=settings.twilio_from_number if settings.allow_live_calls else None,
         worker_threads=settings.worker_threads,
         global_concurrency=settings.global_concurrency,
+        settings=settings,
     )
     app.state.worker = None
     if settings.worker_enabled:
         worker = CampaignWorker(app.state.engine, poll_seconds=settings.worker_poll_seconds)
         worker.start()
         app.state.worker = worker
+    # Phase E: a SEPARATE daemon loop with its own bounded claim. It never
+    # shares the campaign worker's queue, threads, or the live call path.
+    app.state.audio_batch_engine = AudioBatchEngine(app.state.db, settings)
+    app.state.audio_batch_worker = None
+    if settings.worker_enabled:
+        audio_worker = AudioBatchWorker(
+            app.state.audio_batch_engine,
+            poll_seconds=settings.audio_batch_poll_seconds,
+        )
+        audio_worker.start()
+        app.state.audio_batch_worker = audio_worker
     try:
         yield
     finally:
         worker = app.state.worker
         if worker:
             worker.stop()
+        audio_worker = app.state.audio_batch_worker
+        if audio_worker:
+            audio_worker.stop()
 
 
 def _principal_from_request(request: Request) -> TenantPrincipal:
@@ -190,6 +372,9 @@ def create_app(
     app.state.started_at = None
     app.state.seed = None
     app.state.worker = None
+    # Turn-detection diagnostic engines (simulate-probe surface): FIFO
+    # bounded by VOXORA_TURN_DIAGNOSTICS_ENGINES, tenant-scoped.
+    app.state.turn_engines = OrderedDict()
     default_factory: Callable[[Dict[str, Any], SecretBox], Any] = (
         adapter_factory or (lambda connection, secret_box: build_crm_adapter(connection, secret_box))
     )
@@ -250,6 +435,68 @@ def create_app(
             "liveCallsEnabled": bool(app.state.settings.allow_live_calls),
             "time": now_iso(),
         }
+
+    @app.get(
+        "/metrics",
+        response_class=Response,
+        responses={200: {"content": {"text/plain; version=0.0.4; charset=utf-8": {}}}},
+    )
+    def prometheus_metrics(principal: TenantPrincipal = Depends(_principal_from_request)) -> Response:
+        """Prometheus text exposition (roadmap M4c).
+
+        Same bearer-token auth as every other route (scrapers send the
+        standard Authorization header); cross-tenant aggregates — no
+        per-caller scoping, metrics are an operator surface. Latency
+        quantiles come from the same call_latency rows the JSON logs
+        dashboards would use.
+        """
+        snapshot = app.state.db.metrics_snapshot()
+        lines: List[str] = []
+
+        def family(name: str, mtype: str, help_text: str) -> None:
+            lines.append(f"# HELP {name} {help_text}")
+            lines.append(f"# TYPE {name} {mtype}")
+
+        def sample(name: str, labels: str, value: Any) -> None:
+            lines.append(f"{name}{labels} {value}")
+
+        family("voxora_up", "gauge", "Whether the orchestrator answered a scrape.")
+        sample("voxora_up", "", 1)
+        family(
+            "voxora_campaigns_total",
+            "gauge",
+            "Campaigns by status (current rows, not a monotonic counter).",
+        )
+        for status, count in sorted(snapshot["campaigns"].items()):
+            sample("voxora_campaigns_total", f'{{status="{status}"}}', count)
+        family("voxora_calls_total", "gauge", "Calls by status (current rows, not a monotonic counter).")
+        for status, count in sorted(snapshot["calls"].items()):
+            sample("voxora_calls_total", f'{{status="{status}"}}', count)
+        family(
+            "voxora_voice_sessions_total",
+            "gauge",
+            "Voice sessions by status (current rows, not a monotonic counter).",
+        )
+        for status, count in sorted(snapshot["voice_sessions"].items()):
+            sample("voxora_voice_sessions_total", f'{{status="{status}"}}', count)
+        family("voxora_queue_depth", "gauge", "Campaign recipients waiting in the dial queue.")
+        sample("voxora_queue_depth", "", snapshot["queue_depth"])
+        family("voxora_active_calls", "gauge", "Calls currently queued or in progress.")
+        sample("voxora_active_calls", "", snapshot["active_calls"])
+        family(
+            "voxora_call_latency_ms",
+            "gauge",
+            "Per-stage call latency quantiles in milliseconds (summary-style).",
+        )
+        for stage, data in sorted(snapshot["latency"].items()):
+            for quantile, key in (("0.5", "p50"), ("0.95", "p95")):
+                if data.get(key) is not None:
+                    sample("voxora_call_latency_ms", f'{{stage="{stage}",quantile="{quantile}"}}', data[key])
+        lines.append("")
+        return Response(
+            content="\n".join(lines),
+            media_type="text/plain; version=0.0.4; charset=utf-8",
+        )
 
     @app.get("/api/v1/ready")
     def ready() -> Dict[str, Any]:
@@ -387,6 +634,103 @@ def create_app(
         except KeyError:
             raise ApiError(404, "Campaign not found", "campaign_not_found") from None
 
+    @app.post("/api/v1/campaigns/import-audience", status_code=201)
+    def import_audience(
+        payload: AudienceImport,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        """Import a CRM audience as a new campaign (idempotent, fail-closed consent)."""
+        _require_writer(principal)
+        if not app.state.db.get_agent(principal.tenant_id, payload.agent_id):
+            raise ApiError(404, "Agent not found", "agent_not_found")
+        campaign = app.state.db.create_campaign(
+            principal.tenant_id,
+            {
+                "name": payload.campaign_name,
+                "agent_id": payload.agent_id,
+                "status": "draft",
+                "dry_run": payload.dry_run,
+                "max_concurrency": payload.max_concurrency,
+                "max_attempts": payload.max_attempts,
+                "audience_source": payload.source,
+                "audience_id": payload.audience_id,
+                "audience_version": payload.audience_version,
+            },
+        )
+        provider = payload.source if payload.source.startswith("audience-") else f"audience-{payload.source}"
+        contact_ids: List[str] = []
+        rejected: List[Dict[str, Any]] = []
+        seen_external: set = set()
+        for item in payload.contacts:
+            if item.external_contact_id in seen_external:
+                rejected.append({"external_contact_id": item.external_contact_id, "reason": "duplicate_external_id"})
+                continue
+            seen_external.add(item.external_contact_id)
+            if app.state.db.is_suppressed(principal.tenant_id, item.phone):
+                rejected.append({"external_contact_id": item.external_contact_id, "reason": "suppressed_phone"})
+                continue
+            consent_state = "unknown"
+            suppressed = False
+            suppression_reason: Optional[str] = None
+            if item.consent is not None:
+                if item.consent.voice_contact_allowed:
+                    consent_state = "granted"
+                else:
+                    consent_state = "denied"
+                    suppressed = True
+                    suppression_reason = "audience_voice_consent_denied"
+            first_name, _, last_name = (item.name or "").partition(" ")
+            meta = dict(item.metadata)
+            meta.setdefault("audience_id", payload.audience_id)
+            meta.setdefault("audience_version", payload.audience_version)
+            contact = app.state.db.upsert_contact(
+                principal.tenant_id,
+                provider,
+                item.external_contact_id,
+                {
+                    "first_name": first_name or item.external_contact_id,
+                    "last_name": last_name,
+                    "phone": item.phone,
+                    "email": item.email or "",
+                    "timezone": item.timezone or "UTC",
+                    "consent_state": consent_state,
+                    "consent_source": payload.source,
+                    "suppressed": suppressed,
+                    "suppression_reason": suppression_reason,
+                    "custom_fields": meta,
+                },
+                preserve_consent=True,
+            )
+            contact_ids.append(contact["id"])
+        counts = app.state.db.campaign_counts(principal.tenant_id, campaign["id"])
+        if counts.get("recipients", 0) + len(contact_ids) > app.state.settings.max_campaign_recipients:
+            raise ApiError(422, "Campaign recipient limit exceeded", "recipient_limit")
+        added = app.state.db.add_recipients(principal.tenant_id, campaign["id"], contact_ids)
+        app.state.db.audit(
+            principal.tenant_id,
+            principal.name,
+            "campaign.audience_imported",
+            "campaign",
+            campaign["id"],
+            {
+                "source": payload.source,
+                "audience_id": payload.audience_id,
+                "audience_version": payload.audience_version,
+                "imported": len(contact_ids),
+                "added": added,
+                "rejected": rejected,
+            },
+        )
+        return {
+            "campaign_id": campaign["id"],
+            "campaign_name": campaign["name"],
+            "audience_id": payload.audience_id,
+            "audience_version": payload.audience_version,
+            "imported": len(contact_ids),
+            "added": added,
+            "rejected": rejected,
+        }
+
     @app.post("/api/v1/campaigns/{campaign_id}/recipients", status_code=201)
     def add_recipients(
         campaign_id: str,
@@ -445,6 +789,836 @@ def create_app(
         added = app.state.db.add_recipients(principal.tenant_id, campaign_id, result["contactIds"])
         app.state.db.audit(principal.tenant_id, principal.name, "campaign.recipients_synced", "campaign", campaign_id, {"imported": result["imported"], "updated": result["updated"], "added": added})
         return {**result, "addedToCampaign": added}
+
+    # ------------------------------------------- voice sessions (external)
+    @app.post("/api/v1/voice-sessions", status_code=201)
+    def create_voice_session(
+        payload: VoiceSessionCreate,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        """Idempotent session intake; consent/suppression gates are fail-closed."""
+        _require_writer(principal)
+        tenant_id = principal.tenant_id
+        agent_row = app.state.db.get_agent(tenant_id, payload.agent.agent_id)
+        if not agent_row:
+            raise ApiError(404, "Agent not found", "agent_not_found")
+        if app.state.db.is_suppressed(tenant_id, payload.contact.phone):
+            raise ApiError(422, "Phone number is globally suppressed", "suppressed_phone")
+        consent = app.state.db.get_contact_by_phone(payload.contact.phone, tenant_id)
+        if consent is None:
+            consent = app.state.db.create_local_contact(
+                tenant_id,
+                {
+                    "first_name": (payload.contact.name or "").split(" ")[0]
+                    or payload.contact.external_contact_id,
+                    "last_name": " ".join((payload.contact.name or "").split(" ")[1:]),
+                    "phone": payload.contact.phone,
+                    "consent_state": "unknown",
+                },
+            )
+        if consent["suppressed"] or consent["consent_state"] != "granted":
+            raise ApiError(
+                422,
+                "Call refused: no granted consent record for this phone",
+                "consent_required",
+            )
+        existing = app.state.db.get_voice_session_by_external(
+            tenant_id, payload.external_application, payload.external_session_id
+        )
+        if existing is not None:
+            return _voice_session_view(app, principal, existing)
+        live_agent = None
+        if app.state.settings.telephony_provider == "voice-runtime":
+            # Build the agent BEFORE any session/call rows exist: an
+            # unconfigured LLM must 501 without leaving zombie intake state
+            # (idempotent intake would otherwise return the stuck row).
+            from .voice_turn_loop import build_agent
+
+            try:
+                live_agent = build_agent(
+                    app.state.settings.llm_provider, agent_row.get("system_prompt", "")
+                )
+            except ValueError as error:
+                raise ApiError(501, str(error), "llm_provider_unconfigured") from None
+            assert live_agent is not None  # build_agent returns None only on 501 paths
+        first_name, _, last_name = (payload.contact.name or "").partition(" ")
+        contact = app.state.db.upsert_contact(
+            tenant_id,
+            "voice-session",
+            payload.contact.external_contact_id,
+            {
+                "first_name": first_name or payload.contact.external_contact_id,
+                "last_name": last_name,
+                "phone": payload.contact.phone,
+                "consent_state": consent["consent_state"],
+                "consent_source": consent["consent_source"],
+                "custom_fields": {
+                    "external_application": payload.external_application,
+                    "session_metadata": payload.session_metadata,
+                },
+            },
+            preserve_consent=True,
+        )
+        session = app.state.db.create_voice_session(
+            tenant_id,
+            {
+                "external_application": payload.external_application,
+                "external_session_id": payload.external_session_id,
+                "agent_id": payload.agent.agent_id,
+                "model_profile": payload.agent.model_profile,
+                "contact_id": contact["id"],
+                "status": "created",
+                "webhook_url": payload.webhook_url,
+                "session_metadata": payload.session_metadata,
+                "provider": app.state.settings.telephony_provider,
+                "simulated": app.state.settings.telephony_provider != "twilio"
+                or not app.state.settings.allow_live_calls,
+                "voice_boost": (
+                    payload.voice_boost.model_dump(exclude_unset=True)
+                    if payload.voice_boost is not None
+                    else {}
+                ),
+            },
+        )
+        app.state.db.record_voice_session_event(
+            tenant_id, session["id"], "voice_session.created", {"status": "created"}
+        )
+        call = app.state.db.create_voice_call(
+            tenant_id,
+            session["id"],
+            contact["id"],
+            app.state.settings,
+            payload.agent.agent_id,
+        )
+        session = app.state.db.update_voice_session(tenant_id, session["id"], call_id=call["id"], status="queued")
+        app.state.db.record_voice_session_event(
+            tenant_id, session["id"], "voice_session.queued", {"call_id": call["id"]}
+        )
+        from .voice_sessions import dispatch_pending_webhooks
+
+        dispatch_pending_webhooks(app.state.db, app.state.settings, tenant_id, session["id"])
+        if app.state.settings.telephony_provider == "voice-runtime":
+            # M7 live loop: the media backend owns the call; the session
+            # opens with the agent's spoken line and STAYS in flight —
+            # turns advance via POST /voice-sessions/{id}/turns.
+            from .voice_turn_loop import LiveTurnEngine
+
+            assert live_agent is not None  # build_agent ran above; 501 exits before any rows exist
+            app.state.db.update_call(tenant_id, call["id"], target="dialing")
+            app.state.db.update_call(tenant_id, call["id"], target="in_progress")
+            engine = LiveTurnEngine(app.state.db, tenant_id, session["id"], live_agent, settings=app.state.settings)
+            engine.start()
+            session = app.state.db.update_voice_session(tenant_id, session["id"], status="in_flight")
+            app.state.db.record_voice_session_event(
+                tenant_id, session["id"], "voice_session.in_flight", {"call_id": call["id"]}
+            )
+            dispatch_pending_webhooks(app.state.db, app.state.settings, tenant_id, session["id"])
+            session = app.state.db.get_voice_session(tenant_id, session["id"]) or session
+            return _voice_session_view(app, principal, session)
+        from .campaign import CampaignEngine
+
+        engine = app.state.engine
+        assert isinstance(engine, CampaignEngine)
+        from .telephony.base import CallRequest
+
+        app.state.db.update_call(
+            tenant_id,
+            call["id"],
+            target="dialing" if app.state.settings.telephony_provider != "twilio" else "dialing",
+        )
+        request = CallRequest(
+            call_id=call["id"],
+            campaign_id=session["id"],
+            to_number=payload.contact.phone,
+            from_number=app.state.settings.twilio_from_number,
+            idempotency_key=call["idempotency_key"],
+            attempt=1,
+            dry_run=bool(call["simulated"]),
+            agent={"system_prompt": agent_row.get("system_prompt", "")},
+            metadata={"voice_session_id": session["id"], "external_session_id": payload.external_session_id},
+        )
+        result = app.state.telephony.start_call(request)
+        app.state.db.apply_voice_session_result(principal.tenant_id, call["id"], result)
+        session = app.state.db.update_voice_session(
+            tenant_id,
+            session["id"],
+            status="dialing",
+            transcript=result.transcript or [],
+        )
+        from .voice_sessions import settle_voice_session
+
+        if getattr(result, "final", True):
+            settle_voice_session(
+                app.state.db,
+                {"tenant_id": tenant_id, "id": call["id"]},
+                result.disposition,
+                bool(result.ok),
+                {"simulated": bool(result.simulated), "transcript_available": bool(result.transcript)},
+                settings=app.state.settings,
+            )
+            voice_session = app.state.db.get_voice_session_by_call(tenant_id, call["id"])
+            if voice_session is not None:
+                from .voice_sessions import dispatch_pending_webhooks
+
+                dispatch_pending_webhooks(
+                    app.state.db, app.state.settings, tenant_id, voice_session["id"]
+                )
+            session = app.state.db.get_voice_session(tenant_id, session["id"]) or session
+        else:
+            session = app.state.db.update_voice_session(
+                tenant_id, session["id"], status="dialing"
+            )
+        return _voice_session_view(app, principal, session)
+
+    @app.get("/api/v1/voice-sessions/{session_id}")
+    def get_voice_session(
+        session_id: str,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        session = app.state.db.get_voice_session(principal.tenant_id, session_id)
+        if not session:
+            raise ApiError(404, "Voice session not found", "unknown_session")
+        return _voice_session_view(app, principal, session)
+
+    @app.post("/api/v1/voice-sessions/{session_id}/terminate")
+    def terminate_voice_session(
+        session_id: str,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        _require_writer(principal)
+        session = app.state.db.get_voice_session(principal.tenant_id, session_id)
+        if not session:
+            raise ApiError(404, "Voice session not found", "unknown_session")
+        if session["status"] in {"completed", "busy", "no_answer", "failed", "terminated"}:
+            return _voice_session_view(app, principal, session)
+        call = app.state.db.get_call(principal.tenant_id, session["call_id"]) if session["call_id"] else None
+        provider_call_id = call.get("provider_call_id") if call else None
+        canceled_via_provider = False
+        if provider_call_id and call is not None and call["simulated"] == 0:
+            canceled_via_provider = app.state.telephony.cancel_call(provider_call_id)
+        disposition = "canceled" if canceled_via_provider or call else "canceled"
+        from .voice_sessions import settle_voice_session
+
+        if call is not None:
+            result = app.state.db.update_call(
+                principal.tenant_id,
+                call["id"],
+                target="canceled",
+                disposition=disposition,
+                ended_at=iso(),
+            )
+            if result:
+                app.state.db.add_call_event(
+                    principal.tenant_id, call["id"], "canceled", data={"by": principal.name}
+                )
+        if call is not None:
+            settle_voice_session(app.state.db, call, "canceled", True, settings=app.state.settings)
+        updated = app.state.db.update_voice_session(principal.tenant_id, session_id, status="terminated")
+        session = updated or session
+        app.state.db.record_voice_session_event(
+            principal.tenant_id,
+            session_id,
+            "voice_session.terminated",
+            {"by": principal.name, "canceled_via_provider": canceled_via_provider},
+        )
+        from .voice_sessions import dispatch_pending_webhooks
+
+        dispatch_pending_webhooks(
+            app.state.db, app.state.settings, principal.tenant_id, session_id
+        )
+        return _voice_session_view(app, principal, session)
+
+    @app.get("/api/v1/voice-sessions/{session_id}/transcript")
+    def get_voice_session_transcript(
+        session_id: str,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        session = app.state.db.get_voice_session(principal.tenant_id, session_id)
+        if not session:
+            raise ApiError(404, "Voice session not found", "unknown_session")
+        transcript = session["transcript"] or []
+        if not transcript:
+            # Transcript records exist only where the provider returned a
+            # real transcript; live providers record references once wired.
+            return {"session_id": session_id, "transcript_available": False, "entries": []}
+        return {
+            "session_id": session_id,
+            "transcript_available": True,
+            "entries": transcript,
+        }
+
+    @app.post("/api/v1/voice-sessions/{session_id}/instructions")
+    def post_session_instruction(
+        session_id: str,
+        payload: SessionInstruction,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        """Capability-honest mid-call instructions.
+
+        Single signed endpoint, honest about the provider matrix: providers
+        that cannot inject mid-call audio reject with 409 while still
+        recording the instruction for operators, never silently dropping it.
+        """
+        _require_writer(principal)
+        session = app.state.db.get_voice_session(principal.tenant_id, session_id)
+        if not session:
+            raise ApiError(404, "Voice session not found", "unknown_session")
+        row = app.state.db.create_session_instruction(
+            principal.tenant_id,
+            session_id,
+            {
+                "instruction_id": payload.instruction_id,
+                "type": payload.type,
+                "text": payload.text,
+                "priority": payload.priority,
+            },
+        )
+        capabilities = _telephony_capabilities(app.state.settings)
+        if not capabilities.get("mid_call_instructions"):
+            raise ApiError(
+                409,
+                (
+                    f"Provider '{session['provider']}' does not support mid-call instruction "
+                    "injection in this slice; instruction recorded, capability documented."
+                ),
+                "instruction_unsupported",
+                details={"instruction": row, "provider_capabilities": capabilities},
+            )
+        app.state.db.record_voice_session_event(
+            principal.tenant_id,
+            session_id,
+            "voice_session.instruction_received",
+            {"instruction_id": payload.instruction_id, "type": payload.type},
+        )
+        return {
+            "instruction": row,
+            "provider_capabilities": capabilities,
+            "applied": False,
+            "recorded": True,
+        }
+
+    @app.post("/api/v1/voice-sessions/{session_id}/turns")
+    def run_voice_session_turn(
+        session_id: str,
+        payload: SttDeltas,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        """One live-loop turn: caller STT deltas in, server-spoken reply out.
+
+        The media backend (voice-runtime) drives the session; caller deltas
+        are transcript hypotheses only — spoken content comes exclusively
+        from the agent or the instruction store (server-authoritative TTS).
+        Mid-call instructions are drained at the stream boundary and spoken
+        ahead of the agent reply.
+        """
+        _require_writer(principal)
+        tenant_id = principal.tenant_id
+        session = app.state.db.get_voice_session(tenant_id, session_id)
+        if not session:
+            raise ApiError(404, "Voice session not found", "unknown_session")
+        if app.state.settings.telephony_provider != "voice-runtime":
+            raise ApiError(
+                409,
+                (
+                    f"Provider '{app.state.settings.telephony_provider}' does not drive the live "
+                    "turn loop; only the media backend (voice-runtime) does."
+                ),
+                "turn_loop_unsupported",
+                details={"provider_capabilities": _telephony_capabilities(app.state.settings)},
+            )
+        if session["status"] in {"completed", "busy", "no_answer", "failed", "terminated"}:
+            raise ApiError(409, "The live session is no longer active", "session_not_active")
+        agent_row = app.state.db.get_agent(tenant_id, session["agent_id"])
+        if not agent_row:
+            raise ApiError(404, "Agent not found", "agent_not_found")
+        from .voice_turn_loop import (
+            TURN_COMPLETED_EVENT,
+            LiveTurnEngine,
+            VoiceTurnLoopError,
+            build_agent,
+        )
+
+        try:
+            live_agent = build_agent(
+                app.state.settings.llm_provider, agent_row.get("system_prompt", "")
+            )
+        except ValueError as error:
+            raise ApiError(501, str(error), "llm_provider_unconfigured") from None
+        completed_turns = sum(
+            1
+            for event in app.state.db.list_voice_session_events(tenant_id, session_id)
+            if event["event_type"] == TURN_COMPLETED_EVENT
+        )
+        engine = LiveTurnEngine(
+            app.state.db,
+            tenant_id,
+            session_id,
+            live_agent,
+            settings=app.state.settings,
+            completed_turns=completed_turns,
+            resumed=session["status"] == "in_flight",
+            agent_state=(session.get("session_metadata") or {}).get("agent_state"),
+        )
+        if session["status"] in {"created", "queued"}:
+            engine.start()
+        for delta in payload.deltas:
+            engine.ingest_delta(delta)
+        try:
+            result = engine.finish_stream()
+        except VoiceTurnLoopError as error:
+            raise ApiError(409, str(error), "session_not_active") from None
+        if result.ended or result.terminated is not None:
+            from .voice_sessions import dispatch_pending_webhooks
+
+            dispatch_pending_webhooks(app.state.db, app.state.settings, tenant_id, session_id)
+        session = app.state.db.get_voice_session(tenant_id, session_id) or session
+        return {
+            "turn": {
+                "turn_index": result.turn_index,
+                "user_text": result.user_text,
+                "spoken_segments": result.spoken_segments,
+                "instruction_ids": result.instruction_ids,
+                "ended": result.ended,
+                "terminated": result.terminated,
+                "latency_ms": result.latency_ms,
+            },
+            "session": _voice_session_view(app, principal, session),
+        }
+
+    @app.get("/api/v1/voice/providers")
+    def voice_provider_routing_status(
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        """STT/TTS routing table status (roadmap M7/P7).
+
+        Every (provider, modality, language) combination without a dated,
+        provenanced verified-quirks entry is labeled UNVERIFIED and reports
+        `attemptable: false` — unverified combinations are never silently
+        attempted. The registry starts empty by design.
+        """
+        from .voice_providers import provider_status, routing_table_from_settings
+
+        settings: Settings = app.state.settings
+        configured = bool(settings.voice_provider_adapters or settings.voice_provider_chains)
+        try:
+            status = provider_status(routing_table_from_settings(settings))
+        except ValueError as error:
+            raise ApiError(500, f"voice provider routing config invalid: {error}", "routing_config_invalid") from None
+        return {"configured": configured, **status}
+
+    # ------------------------------------------- voice boost settings (M9)
+    @app.get("/api/v1/voice/boost/settings")
+    def get_voice_boost_settings(
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        """Resolved global Voice Boost defaults for the tenant.
+
+        Seeds the builtin CLEAR/enabled row once for a fresh tenant. The DSP
+        executes inside the Rust media engine; live-call application waits on
+        the M7 media transport (no claim that live calls are enhanced today).
+        """
+        from .voice_boost import resolve_voice_boost_settings
+
+        return resolve_voice_boost_settings(app.state.db, principal.tenant_id, None)
+
+    @app.put("/api/v1/voice/boost/settings")
+    def put_voice_boost_settings(
+        payload: VoiceBoostSettingsUpdate,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        _require_writer(principal)
+        stored = app.state.db.put_voice_boost_settings(
+            principal.tenant_id,
+            payload.profile,
+            payload.overrides.resolved(),
+            enabled=payload.enabled,
+        )
+        app.state.db.audit(
+            principal.tenant_id,
+            principal.name,
+            "voice_boost.settings_updated",
+            "voice_boost_settings",
+            principal.tenant_id,
+            {"profile": stored["profile"], "enabled": stored["enabled"]},
+        )
+        return {
+            "profile": stored["profile"],
+            "overrides": stored.get("config") or {},
+            "enabled": bool(stored.get("enabled", True)),
+        }
+
+    # --------------------------------- audio generation assets (M10 Phase B)
+    @app.post("/api/v1/audio-assets/generate", status_code=201)
+    def generate_audio_asset(
+        payload: AudioAssetGenerate,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        """Generate one audio asset (operator surface; never the call loop).
+
+        Unconfigured provider → 501; provider refusal → 502 with a sanitized
+        detail (provider messages never reach clients, keys never leak).
+        """
+        _require_writer(principal)
+        try:
+            asset = generate_asset(
+                app.state.db,
+                app.state.settings,
+                principal.tenant_id,
+                principal.name,
+                payload.model_dump(),
+            )
+        except ValueError as error:
+            raise ApiError(501, str(error), "audio_provider_unconfigured") from None
+        except AudioGenerationError as error:
+            raise ApiError(502, error.detail, "audio_provider_failed") from None
+        app.state.db.audit(
+            principal.tenant_id,
+            principal.name,
+            "audio.asset_generated",
+            "audio_asset",
+            asset["id"],
+            {"provider": asset["provider"], "voice": asset["voice"], "format": asset["format"]},
+        )
+        return asset
+
+    @app.post("/api/v1/audio-assets/generate-long", status_code=201)
+    def generate_audio_asset_long(
+        payload: LongFormGenerate,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        """Long-form generation (M10 Phase D): chunked, assembled, honest.
+
+        201 even on partial chunk failure — the body carries `processing`
+        status and the failed chunk; retry-failed completes the run.
+        """
+        _require_writer(principal)
+        try:
+            # Build the provider at the edge: unconfigured → 501, matching
+            # the single-request generate route's contract.
+            provider = build_tts_provider(app.state.settings)
+        except ValueError as error:
+            raise ApiError(501, str(error), "audio_provider_unconfigured") from None
+        try:
+            asset = generate_long_form(
+                app.state.db,
+                app.state.settings,
+                principal.tenant_id,
+                principal.name,
+                payload.model_dump(),
+                provider=provider,
+            )
+        except ValueError as error:
+            raise ApiError(422, str(error), "longform_invalid") from None
+        return asset
+
+    @app.post("/api/v1/audio-assets/{asset_id}/retry-failed")
+    def retry_audio_asset_failed(
+        asset_id: str,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        """Retry ONLY failed chunks of a long-form run (M10 Phase D)."""
+        _require_writer(principal)
+        asset = app.state.db.get_audio_asset(principal.tenant_id, asset_id)
+        if asset is None:
+            raise ApiError(404, "audio asset not found", "not_found")
+        try:
+            provider = build_tts_provider(app.state.settings)
+        except ValueError as error:
+            raise ApiError(501, str(error), "audio_provider_unconfigured") from None
+        try:
+            return retry_long_form(
+                app.state.db,
+                app.state.settings,
+                principal.tenant_id,
+                principal.name,
+                asset,
+                provider=provider,
+            )
+        except RunInFlightError as error:
+            raise ApiError(409, str(error), "run_in_flight") from None
+        except ValueError as error:
+            raise ApiError(409, str(error), "longform_invalid") from None
+
+    @app.get("/api/v1/audio-assets")
+    def list_audio_assets(
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        search: Optional[str] = Query(default=None, max_length=120),
+        status: Optional[str] = Query(default=None, max_length=40),
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        items, total = app.state.db.list_audio_assets(
+            principal.tenant_id, limit, offset, search, status
+        )
+        return _page(items, total, limit, offset)
+
+    @app.get("/api/v1/audio-assets/{asset_id}")
+    def get_audio_asset(
+        asset_id: str,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        asset = app.state.db.get_audio_asset(principal.tenant_id, asset_id)
+        if asset is None:
+            raise ApiError(404, "audio asset not found", "not_found")
+        return asset
+
+    @app.get("/api/v1/audio-assets/{asset_id}/download")
+    def download_audio_asset(
+        asset_id: str,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Response:
+        asset = app.state.db.get_audio_asset(principal.tenant_id, asset_id)
+        if asset is None:
+            raise ApiError(404, "audio asset not found", "not_found")
+        if asset["status"] == "processing":
+            raise ApiError(409, "audio asset is still processing", "still_processing")
+        store = AudioFileStore(app.state.settings.audio_storage_path)
+        path = store.path_for(principal.tenant_id, asset_id, asset["format"])
+        if not path.exists():
+            raise ApiError(404, "audio asset file missing", "file_missing")
+        content_type, disposition = store.download_headers(asset["title"], asset["format"])
+        return Response(
+            content=path.read_bytes(),
+            media_type=content_type,
+            headers={"Content-Disposition": disposition},
+        )
+
+    @app.delete("/api/v1/audio-assets/{asset_id}")
+    def delete_audio_asset(
+        asset_id: str,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        _require_writer(principal)
+        asset = app.state.db.get_audio_asset(principal.tenant_id, asset_id)
+        if asset is None or not app.state.db.delete_audio_asset(
+            principal.tenant_id, asset_id
+        ):
+            raise ApiError(404, "audio asset not found", "not_found")
+        store = AudioFileStore(app.state.settings.audio_storage_path)
+        store.delete(store.path_for(principal.tenant_id, asset_id, asset["format"]))
+        for chunk_file in (store.root / principal.tenant_id).glob(f"{asset_id}_chunk_*"):
+            store.delete(chunk_file)
+        app.state.db.audit(
+            principal.tenant_id,
+            principal.name,
+            "audio.asset_deleted",
+            "audio_asset",
+            asset_id,
+            {"title": asset["title"]},
+        )
+        return {"deleted": True, "id": asset_id}
+
+    @app.post("/api/v1/audio-assets/{asset_id}/variants", status_code=201)
+    def create_audio_variant(
+        asset_id: str,
+        payload: VariantOpsRequest,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        """Derive a non-destructive variant (M10 Phase C).
+
+        ValueError from the engine → 422 `variant_invalid`; RuntimeError
+        (engine unavailable) → 503 `audio_engine_unavailable`. The parent is
+        only ever read.
+        """
+        _require_writer(principal)
+        parent = app.state.db.get_audio_asset(principal.tenant_id, asset_id)
+        if parent is None:
+            raise ApiError(404, "audio asset not found", "not_found")
+        if parent["status"] != "ready":
+            raise ApiError(422, "asset is not ready for variant processing", "variant_invalid")
+        from .variants import create_variant
+
+        ops = [op.model_dump(exclude_none=True) for op in payload.ops]
+        try:
+            variant = create_variant(
+                app.state.db,
+                app.state.settings,
+                principal.tenant_id,
+                principal.name,
+                parent,
+                ops,
+            )
+        except ValueError as error:
+            raise ApiError(422, str(error), "variant_invalid") from None
+        except RuntimeError as error:
+            raise ApiError(503, str(error), "audio_engine_unavailable") from None
+        return variant
+
+    @app.get("/api/v1/audio-assets/{asset_id}/variants")
+    def list_audio_variants(
+        asset_id: str,
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        if app.state.db.get_audio_asset(principal.tenant_id, asset_id) is None:
+            raise ApiError(404, "audio asset not found", "not_found")
+        items = app.state.db.list_audio_asset_variants(principal.tenant_id, asset_id)
+        total = len(items)
+        window = items[offset : offset + limit]
+        return _page(window, total, limit, offset)
+
+    @app.get("/api/v1/audio/providers")
+    def audio_provider_status(
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        """Capability-honest TTS provider status, mirroring voice_providers."""
+        settings: Settings = app.state.settings
+        try:
+            provider = build_tts_provider(settings)
+            status = provider.status()
+        except ValueError as error:
+            status = {
+                "configured": False,
+                "live": False,
+                "simulated": False,
+                "detail": str(error),
+            }
+        return {"configured_provider": settings.audio_tts_provider, **status}
+
+    # --------------------------------------- audio CSV batches (M10 Phase E)
+    def _batch_defaults(raw: str) -> Dict[str, Any]:
+        try:
+            return AudioBatchDefaults.model_validate_json(raw or "{}").model_dump()
+        except ValidationError as error:
+            raise ApiError(
+                422,
+                "invalid batch defaults",
+                "batch_defaults_invalid",
+                [str(item.get("msg", "invalid")) for item in error.errors()],
+            ) from None
+
+    def _require_audio_provider_configured() -> None:
+        try:
+            build_tts_provider(app.state.settings)
+        except ValueError as error:
+            raise ApiError(501, str(error), "audio_provider_unconfigured") from None
+
+    @app.post("/api/v1/audio/batches/preview")
+    async def preview_audio_batch(
+        file: UploadFile = File(...),
+        defaults: str = Form("{}"),
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        """Validate a CSV and return a row-level preview without queuing work."""
+        parsed = _batch_defaults(defaults)
+        try:
+            result = parse_batch_csv(
+                await file.read(), parsed, settings.audio_batch_max_records
+            )
+        except BatchCsvError as error:
+            raise ApiError(422, str(error), "batch_csv_invalid") from None
+        return {
+            "filename": file.filename or "batch.csv",
+            "columns": result["columns"],
+            "rowCount": result["rowCount"],
+            "validCount": result["validCount"],
+            "errors": result["errors"],
+            "preview": result["preview"],
+        }
+
+    @app.post("/api/v1/audio/batches", status_code=201)
+    async def create_audio_batch(
+        file: UploadFile = File(...),
+        defaults: str = Form("{}"),
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        """Queue one CSV batch; the audio worker processes it in the background."""
+        _require_writer(principal)
+        _require_audio_provider_configured()
+        parsed = _batch_defaults(defaults)
+        try:
+            result = parse_batch_csv(
+                await file.read(), parsed, settings.audio_batch_max_records
+            )
+        except BatchCsvError as error:
+            raise ApiError(422, str(error), "batch_csv_invalid") from None
+        job = app.state.db.create_audio_batch(
+            principal.tenant_id,
+            file.filename or "batch.csv",
+            parsed,
+            result["records"],
+        )
+        app.state.db.audit(
+            principal.tenant_id,
+            principal.name,
+            "audio.batch_created",
+            "audio_batch",
+            job["id"],
+            {"total": job["total"], "filename": job["filename"]},
+        )
+        return job
+
+    @app.get("/api/v1/audio/batches")
+    def list_audio_batches(
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        items, total = app.state.db.list_audio_batches(principal.tenant_id, limit, offset)
+        return _page(items, total, limit, offset)
+
+    @app.get("/api/v1/audio/batches/{batch_id}")
+    def get_audio_batch(
+        batch_id: str,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        job = app.state.db.get_audio_batch(principal.tenant_id, batch_id)
+        if job is None:
+            raise ApiError(404, "audio batch not found", "not_found")
+        return job
+
+    @app.post("/api/v1/audio/batches/process")
+    def process_audio_batch_now(
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        """Run ONE bounded claim cycle on demand (used by the Processing view).
+
+        This uses the dedicated audio engine — never the campaign/call worker —
+        and returns immediately after the bounded cycle, not after the batch.
+        """
+        _require_writer(principal)
+        _require_audio_provider_configured()
+        processed = app.state.audio_batch_engine.run_once()
+        return {"processed": processed, "claimSize": settings.audio_batch_claim_size}
+
+    @app.post("/api/v1/audio/batches/{batch_id}/retry-failed")
+    def retry_audio_batch_failed(
+        batch_id: str,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        """Requeue FAILED records only; ready records are never regenerated."""
+        _require_writer(principal)
+        _require_audio_provider_configured()
+        retried = app.state.db.retry_failed_audio_batch_items(principal.tenant_id, batch_id)
+        if retried is None:
+            raise ApiError(404, "audio batch not found", "not_found")
+        count, job = retried
+        if count == 0:
+            raise ApiError(409, "audio batch has no failed records", "batch_no_failed_items")
+        app.state.db.audit(
+            principal.tenant_id,
+            principal.name,
+            "audio.batch_retried",
+            "audio_batch",
+            batch_id,
+            {"retried": count},
+        )
+        return job
+
+    @app.get("/api/v1/audio/batches/{batch_id}/report")
+    def download_audio_batch_report(
+        batch_id: str,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Response:
+        job = app.state.db.get_audio_batch(principal.tenant_id, batch_id)
+        if job is None:
+            raise ApiError(404, "audio batch not found", "not_found")
+        return Response(
+            content=batch_report_csv(job),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="batch-{batch_id}.csv"'},
+        )
 
     # ------------------------------------------------------------- contacts
     @app.get("/api/v1/contacts")
@@ -547,6 +1721,91 @@ def create_app(
         app.state.db.audit(principal.tenant_id, principal.name, "call.canceled", "call", call_id)
         return app.state.db.get_call_detail(principal.tenant_id, call_id)
 
+    # -------------------------------------------------------- AI model router
+    @app.post("/api/v1/ai/decide")
+    def ai_decide(
+        payload: AiDecideRequest,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        """One-shot model decision through Voxora's LLM router.
+
+        The calling application keeps its methodology; Voxora owns the
+        OpenRouter key, model selection, routing, and usage/billing capture
+        (honest zeros when the provider supplies no cost). 501 when the
+        configured provider cannot serve text decisions.
+        """
+        _require_writer(principal)
+        settings: Settings = app.state.settings
+        from .model_profiles import (
+            DEFAULT_MODEL_PROFILE,
+            UnknownModelProfileError,
+            resolve_model_profile,
+        )
+
+        profile_name = payload.model_profile or DEFAULT_MODEL_PROFILE
+        try:
+            resolved = resolve_model_profile(app.state.db, principal.tenant_id, profile_name, "analyze")
+        except UnknownModelProfileError as error:
+            raise ApiError(
+                501,
+                str(error),
+                "model_profile_unknown",
+                details={"configured": error.configured, "task": error.task},
+            ) from None
+        if settings.llm_provider == "openrouter":
+            from voxora_ai.openrouter import OpenRouterError, OpenRouterLLM
+
+            try:
+                llm = OpenRouterLLM(model=resolved["model"])
+                decision = llm.decide(payload.system_prompt, payload.user_prompt)
+            except ValueError as error:
+                raise ApiError(501, str(error), "llm_provider_unconfigured") from None
+            except OpenRouterError as error:
+                raise ApiError(503, str(error), "llm_unavailable") from None
+        else:
+            llm = None
+            decision = _mock_llm_decision(payload.system_prompt, payload.user_prompt)
+        recorded_usage = llm.usage_report() if llm is not None else {
+            "prompt_tokens": 0.0,
+            "completion_tokens": 0.0,
+            "total_tokens": 0.0,
+            "cost_usd": 0.0,
+        }
+        app.state.db.record_ai_usage(
+            principal.tenant_id,
+            profile=resolved["profile"],
+            task="analyze",
+            model=resolved["model"],
+            provider=settings.llm_provider,
+            prompt_tokens=float(recorded_usage.get("prompt_tokens") or 0.0),
+            completion_tokens=float(recorded_usage.get("completion_tokens") or 0.0),
+            total_tokens=float(recorded_usage.get("total_tokens") or 0.0),
+            cost_usd=float(recorded_usage.get("cost_usd") or 0.0),
+        )
+        app.state.db.audit(
+            principal.tenant_id,
+            principal.name,
+            "ai.decide",
+            "llm",
+            None,
+            {
+                "provider": settings.llm_provider,
+                "model_profile": resolved["profile"],
+                "task": "analyze",
+                "model": resolved["model"],
+                "source": "voxora" if llm is not None else "mock-llm",
+            },
+        )
+        response: Dict[str, Any] = {
+            "decision": decision,
+            "source": "openrouter" if llm is not None else "mock-llm",
+            "profile": resolved["profile"],
+            "task": "analyze",
+            "model": resolved["model"],
+            "recorded_usage": recorded_usage,
+        }
+        return response
+
     # -------------------------------------------------------- telephony info
     @app.get("/api/v1/telephony/providers")
     def telephony_providers(principal: TenantPrincipal = Depends(_principal_from_request)) -> Dict[str, Any]:
@@ -554,6 +1813,307 @@ def create_app(
             "data": telephony_provider_status(app.state.settings),
             "active": telephony_provider_status(app.state.settings)[0]["id"] if app.state.settings.telephony_provider == "mock" else None,
         }
+
+    # --------------------------------------------- turn detection diagnostics
+    # Every feature of the Rust turn-detection engine (crates/voice-runtime
+    # controller.rs) maps onto an endpoint here. The engines are
+    # simulation probes: one per session, tenant-scoped, bounded by
+    # VOXORA_TURN_DIAGNOSTICS_ENGINES; the event batches are the canonical
+    # `td_events.rs` schema (snake_case) passed through verbatim.
+
+    def turn_engine_registry() -> OrderedDict[str, Dict[str, Any]]:
+        return app.state.turn_engines
+
+    def _turn_engine_or_404(engine_id: str) -> Tuple[TurnDetectionEngine, Dict[str, Any]]:
+        engine_record = turn_engine_registry().get(engine_id)
+        if engine_record is None:
+            raise ApiError(404, "Turn-detection engine not found", "turn_engine_not_found")
+        return engine_record["engine"], engine_record
+
+    def _turn_engine_for_tenant_or_404(engine_id: str, tenant_id: str) -> Tuple[TurnDetectionEngine, Dict[str, Any]]:
+        engine, record = _turn_engine_or_404(engine_id)
+        if record["tenant_id"] != tenant_id:
+            raise ApiError(404, "Turn-detection engine not found", "turn_engine_not_found")
+        return engine, record
+
+    def _turn_timestamp(payload_timestamp: Optional[int], record: Dict[str, Any]) -> int:
+        # The engine never reads clocks: sessions start at 0 and callers
+        # advance transport time. A null timestamp continues the session
+        # clock at 20ms cadence per engine call.
+        if payload_timestamp is not None:
+            return int(payload_timestamp)
+        record["auto_ts"] = int(record.get("auto_ts", 0)) + 20
+        return int(record["auto_ts"])
+
+    def _turn_events_response(
+        record: Dict[str, Any], events: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        # Retain a bounded diagnostics window (newest last) for the replay
+        # endpoint and the console turn timeline.
+        buffer: List[Dict[str, Any]] = record["events"]
+        if events:
+            buffer.extend(events)
+            del buffer[:-_TURN_EVENT_BUFFER_MAX]
+        return {"events": events, "snapshot": record["engine"].snapshot()}
+
+    @app.get("/api/v1/voice/turn/config")
+    def turn_config(principal: TenantPrincipal = Depends(_principal_from_request)) -> Dict[str, Any]:
+        settings: Settings = app.state.settings
+        return {
+            "engineAvailable": turn_engine_available(),
+            "engineVersion": turn_extension_version(),
+            "profile": settings.turn_endpoint_profile,
+            "semanticEnabled": settings.turn_semantic_enabled,
+            "wordGateMinWords": settings.turn_word_gate_min_words,
+            "schemaVersion": TURN_SCHEMA_VERSION,
+            "states": list(TURN_STATES),
+            "eventTypes": list(TURN_EVENT_TYPES),
+            "profiles": list(ENDPOINT_PROFILES),
+            "agentEventKinds": list(AGENT_EVENT_KINDS),
+            "semanticVerdicts": list(SEMANTIC_VERDICTS),
+            "activeEngines": len(turn_engine_registry()),
+            "engineCapacity": settings.turn_diagnostics_engines,
+        }
+
+    @app.post("/api/v1/voice/turn/engines", status_code=201)
+    def create_turn_engine(
+        payload: TurnEngineCreate, principal: TenantPrincipal = Depends(_principal_from_request)
+    ) -> Dict[str, Any]:
+        _require_writer(principal)
+        settings: Settings = app.state.settings
+        if not turn_engine_available():
+            raise ApiError(
+                503,
+                "voxora_voice_runtime is not installed; build it with "
+                "`make py-voice` or `pip install -e crates/voice-runtime`.",
+                "turn_engine_unavailable",
+            )
+        registry = turn_engine_registry()
+        while len(registry) >= settings.turn_diagnostics_engines:
+            # FIFO eviction: the oldest diagnostic engine is retired.
+            _, evicted = next(iter(registry.items()))
+            with suppress(TurnDetectionError):
+                # Already ended evictions are inert and harmless.
+                evicted["engine"].end_call(evicted.get("auto_ts", 0))
+            registry.pop(next(iter(registry.keys())))
+        profile = payload.profile or settings.turn_endpoint_profile
+        try:
+            engine: TurnDetectionEngine = TurnDetectionEngine(
+                call_id=payload.call_id,
+                profile=profile,
+                semantic_enabled=(
+                    payload.semantic_enabled
+                    if payload.semantic_enabled is not None
+                    else settings.turn_semantic_enabled
+                ),
+                word_gate_min_words=(
+                    payload.word_gate_min_words
+                    if payload.word_gate_min_words is not None
+                    else settings.turn_word_gate_min_words
+                ),
+            )
+        except TurnDetectionError as error:
+            raise ApiError(400, str(error), "turn_engine_invalid") from None
+        engine_id = str(uuid.uuid4())
+        record: Dict[str, Any] = {
+            "engine": engine,
+            "engine_id": engine_id,
+            "tenant_id": principal.tenant_id,
+            "call_id": payload.call_id,
+            "profile": profile,
+            "created_at": now_iso(),
+            "auto_ts": 0,
+            "events": [],
+        }
+        registry[engine_id] = record
+        app.state.db.audit(
+            principal.tenant_id,
+            principal.name,
+            "voice.turn_engine_created",
+            "turn_engine",
+            engine_id,
+            {"profile": profile},
+        )
+        return {"id": engine_id, **record["engine"].snapshot(), "createdAt": record["created_at"]}
+
+    @app.get("/api/v1/voice/turn/engines")
+    def list_turn_engines(principal: TenantPrincipal = Depends(_principal_from_request)) -> Dict[str, Any]:
+        registry = turn_engine_registry()
+        return {
+            "data": [
+                {
+                    "id": engine_id,
+                    "callId": record["call_id"],
+                    "profile": record["profile"],
+                    "createdAt": record["created_at"],
+                    **record["engine"].snapshot(),
+                }
+                for engine_id, record in registry.items()
+                if record["tenant_id"] == principal.tenant_id
+            ]
+        }
+
+    @app.get("/api/v1/voice/turn/engines/{engine_id}")
+    def get_turn_engine(engine_id: str, principal: TenantPrincipal = Depends(_principal_from_request)) -> Dict[str, Any]:
+        _, record = _turn_engine_for_tenant_or_404(engine_id, principal.tenant_id)
+        return {
+            "id": engine_id,
+            "callId": record["call_id"],
+            "profile": record["profile"],
+            "createdAt": record["created_at"],
+            **record["engine"].snapshot(),
+        }
+
+    @app.post("/api/v1/voice/turn/engines/{engine_id}/frames")
+    def feed_turn_frame(
+        engine_id: str,
+        payload: TurnAudioFrame,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        engine, record = _turn_engine_or_404(engine_id)
+        if record["tenant_id"] != principal.tenant_id:
+            raise ApiError(404, "Turn-detection engine not found", "turn_engine_not_found")
+        try:
+            events = engine.feed_audio(
+                _turn_timestamp(payload.timestamp_ms, record),
+                payload.rms,
+                payload.agent_playing,
+                payload.tts_elapsed_ms,
+                payload.since_agent_audio_ms,
+            )
+        except TurnDetectionError as error:
+            raise ApiError(409, str(error), "turn_engine_rejected") from None
+        return _turn_events_response(record, events)
+
+    @app.post("/api/v1/voice/turn/engines/{engine_id}/transcript")
+    def feed_turn_transcript(
+        engine_id: str,
+        payload: TurnTranscript,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        engine, record = _turn_engine_or_404(engine_id)
+        if record["tenant_id"] != principal.tenant_id:
+            raise ApiError(404, "Turn-detection engine not found", "turn_engine_not_found")
+        try:
+            events = engine.feed_transcript(
+                _turn_timestamp(payload.timestamp_ms, record), payload.text, payload.is_final
+            )
+        except TurnDetectionError as error:
+            raise ApiError(409, str(error), "turn_engine_rejected") from None
+        return _turn_events_response(record, events)
+
+    @app.post("/api/v1/voice/turn/engines/{engine_id}/semantic")
+    def feed_turn_semantic(
+        engine_id: str,
+        payload: TurnSemanticReport,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        engine, record = _turn_engine_or_404(engine_id)
+        if record["tenant_id"] != principal.tenant_id:
+            raise ApiError(404, "Turn-detection engine not found", "turn_engine_not_found")
+        try:
+            events = engine.feed_semantic(
+                _turn_timestamp(payload.timestamp_ms, record), payload.verdict, payload.confidence
+            )
+        except TurnDetectionError as error:
+            raise ApiError(409, str(error), "turn_engine_rejected") from None
+        return _turn_events_response(record, events)
+
+    @app.post("/api/v1/voice/turn/engines/{engine_id}/lid")
+    def feed_turn_lid(
+        engine_id: str,
+        payload: TurnLidReport,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        engine, record = _turn_engine_or_404(engine_id)
+        if record["tenant_id"] != principal.tenant_id:
+            raise ApiError(404, "Turn-detection engine not found", "turn_engine_not_found")
+        try:
+            events = engine.feed_lid(
+                _turn_timestamp(payload.timestamp_ms, record), payload.language, payload.switch
+            )
+        except TurnDetectionError as error:
+            raise ApiError(409, str(error), "turn_engine_rejected") from None
+        return _turn_events_response(record, events)
+
+    @app.post("/api/v1/voice/turn/engines/{engine_id}/agent-events")
+    def feed_turn_agent_event(
+        engine_id: str,
+        payload: TurnAgentEvent,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        engine, record = _turn_engine_or_404(engine_id)
+        if record["tenant_id"] != principal.tenant_id:
+            raise ApiError(404, "Turn-detection engine not found", "turn_engine_not_found")
+        try:
+            events = engine.feed_agent_event(
+                _turn_timestamp(payload.timestamp_ms, record), payload.kind, payload.generation
+            )
+        except TurnDetectionError as error:
+            raise ApiError(409, str(error), "turn_engine_rejected") from None
+        return _turn_events_response(record, events)
+
+    @app.post("/api/v1/voice/turn/engines/{engine_id}/provider-failure")
+    def feed_turn_provider_failure(
+        engine_id: str,
+        payload: TurnProviderFailure,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        engine, record = _turn_engine_or_404(engine_id)
+        if record["tenant_id"] != principal.tenant_id:
+            raise ApiError(404, "Turn-detection engine not found", "turn_engine_not_found")
+        try:
+            events = engine.note_provider_failure(
+                _turn_timestamp(payload.timestamp_ms, record), payload.hint
+            )
+        except TurnDetectionError as error:
+            raise ApiError(409, str(error), "turn_engine_rejected") from None
+        return _turn_events_response(record, events)
+
+    @app.post("/api/v1/voice/turn/engines/{engine_id}/provider-recovery")
+    def feed_turn_provider_recovery(
+        engine_id: str,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        engine, record = _turn_engine_or_404(engine_id)
+        if record["tenant_id"] != principal.tenant_id:
+            raise ApiError(404, "Turn-detection engine not found", "turn_engine_not_found")
+        try:
+            events = engine.note_provider_recovered(_turn_timestamp(None, record))
+        except TurnDetectionError as error:
+            raise ApiError(409, str(error), "turn_engine_rejected") from None
+        return _turn_events_response(record, events)
+
+    @app.get("/api/v1/voice/turn/engines/{engine_id}/events")
+    def get_turn_engine_events(
+        engine_id: str,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        _, record = _turn_engine_for_tenant_or_404(engine_id, principal.tenant_id)
+        return {"id": engine_id, "events": record["events"]}
+
+    @app.delete("/api/v1/voice/turn/engines/{engine_id}", status_code=200)
+    def delete_turn_engine(engine_id: str, principal: TenantPrincipal = Depends(_principal_from_request)) -> Dict[str, Any]:
+        _require_writer(principal)
+        engine, record = _turn_engine_for_tenant_or_404(engine_id, principal.tenant_id)
+        final_events: List[Dict[str, Any]] = []
+        try:
+            final_events = engine.end_call(_turn_timestamp(None, record))
+        except TurnDetectionError as error:  # already ended: still evict
+            logging.getLogger(__name__).debug("turn engine double-end: %s", error)
+        response: Dict[str, Any] = {"ended": True, "snapshot": record["engine"].snapshot()}
+        if final_events:
+            response["events"] = final_events
+        app.state.db.audit(
+            principal.tenant_id,
+            principal.name,
+            "voice.turn_engine_ended",
+            "turn_engine",
+            engine_id,
+            {"turnsCompleted": record["engine"].snapshot().get("turnsCompleted", 0)},
+        )
+        turn_engine_registry().pop(engine_id, None)
+        return response
 
     # ---------------------------------------------------------- CRM adapters
     @app.get("/api/v1/integrations/crm/providers")
@@ -788,6 +2348,34 @@ def create_app(
         call = request.app.state.db.get_call_by_provider_call_id(call_sid)
         if call is None:
             raise HTTPException(status_code=404, detail=_error_body("call_not_found", "No call matches CallSid"))
+        # Recording callback (roadmap M5/P2): Twilio posts recording status as
+        # its own signed callback carrying RecordingUrl/RecordingSid. Store the
+        # reference on the voice session and emit recording.ready; downstream
+        # consumers read recordings via the outbound contract only.
+        recording_url = form.get("RecordingUrl") or ""
+        if recording_url:
+            db = request.app.state.db
+            voice_session = db.get_voice_session_by_call(call["tenant_id"], call["id"])
+            if voice_session is not None:
+                recording_sid = form.get("RecordingSid") or ""
+                db.update_voice_session(
+                    call["tenant_id"],
+                    voice_session["id"],
+                    recording_url=recording_url,
+                    recording_sid=recording_sid,
+                )
+                db.record_voice_session_event(
+                    call["tenant_id"],
+                    voice_session["id"],
+                    "recording.ready",
+                    {"recording_url": recording_url, "recording_sid": recording_sid},
+                )
+                from .voice_sessions import dispatch_pending_webhooks
+
+                dispatch_pending_webhooks(
+                    db, request.app.state.settings, call["tenant_id"], voice_session["id"]
+                )
+            return Response(content="<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response/>", media_type="application/xml")
         from datetime import datetime, timezone
 
         adapter = request.app.state.telephony

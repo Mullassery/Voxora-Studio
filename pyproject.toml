@@ -1,0 +1,44 @@
+# Root packaging metadata: uv workspace + pip fallback.
+#
+# uv (preferred):
+#     uv sync --all-packages --extra voice
+#   resolves the workspace members (services/ai-runtime,
+#   services/orchestrator, crates/voice-runtime maturin extension) and
+#   builds the Rust extension with the system toolchain.
+#
+# pip (no uv installed):
+#     make py-install                 # editable installs of members+dev deps
+#   which runs, in the resilient order:
+#     pip install -e services/ai-runtime[dev] \
+#                 -e services/orchestrator[dev] \
+#                 -e crates/voice-runtime
+#
+# The `voxora_voice_runtime` maturin extension is NOT on PyPI; it always
+# builds from `crates/voice-runtime` (Rust toolchain required).
+
+[project]
+name = "voxora-studio"
+version = "0.1.0"
+description = "Voxora Studio monorepo (orchestrator + AI runtime + voice runtime extension)"
+requires-python = ">=3.9"
+# Meta package: the real packages live in the workspace members below;
+# per-package dependencies are declared in each member's pyproject. The
+# voice extra pulls the source-built Rust extension (maturin) rather than
+# PyPI, which never carries it.
+dependencies = [
+  "voxora-orchestrator",
+  "voxora-ai-runtime",
+]
+readme = "README.md"
+
+[tool.uv.sources]
+voxora-orchestrator = { workspace = true }
+voxora-ai-runtime = { workspace = true }
+voxora_voice_runtime = { workspace = true }
+
+[tool.uv.workspace]
+members = ["services/orchestrator", "services/ai-runtime", "crates/voice-runtime"]
+
+[tool.uv]
+# The root is not a package itself; sync members explicitly.
+package = false

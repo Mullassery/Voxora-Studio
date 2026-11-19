@@ -61,6 +61,42 @@ Voxora-Studio/
   admin/operator/viewer roles; per-request scoping by tenant id; constant-time
   token compare.
 
+## Audio Generation Studio (M10)
+
+The PRODUCE half of the voice pipeline is additive beside the live call path.
+`tts_generation.py` owns the `TTSProvider` protocol and registry: `mock` is
+deterministic and reports `simulated: true`; `openai` is implemented against the
+documented REST contract and is live-unverified without credentials. Building
+an unconfigured provider raises `ValueError`, which the API maps to 501 — it
+never silently fabricates audio. Provider selection is
+`VOXORA_AUDIO_TTS_PROVIDER`; the OpenAI key is `VOXORA_OPENAI_API_KEY` and is
+never exposed to the console. `VOXORA_AUDIO_STORAGE_PATH` selects the local asset
+root.
+
+Modules: `audio_assets.py` (path-safe file store, blob validation, sanitized
+download headers), `variants.py` (optional non-destructive WAV variants through
+the shared Rust/M9 DSP), `longform.py` (paragraph-preserving chunking,
+assembly, retry-without-regeneration), and `audio_batches.py` (CSV intake,
+client-side rate pacing, `AudioBatchEngine`, `AudioBatchWorker`). Persistence is
+additive: `audio_assets`, `audio_batch_jobs`, and `audio_batch_items` are
+tenant-scoped tables on both SQLite and Postgres; `recover_inflight()` also
+requeues stale batch work on startup.
+
+`api.py` mounts dedicated `/api/v1/audio-assets` and `/api/v1/audio/batches`
+routes with the existing bearer auth, writer gating, audit, and `_page`
+conventions. When `worker_enabled`, the lifespan starts a separate
+`AudioBatchWorker` thread; `POST /api/v1/audio/batches/process` runs one bounded
+claim cycle on demand. The campaign/call worker is never reused. Batch settings
+`VOXORA_AUDIO_BATCH_MAX_RECORDS`, `_CLAIM_SIZE`, `_RATE_PER_MINUTE`,
+`_RATE_LIMIT_BACKOFF_SECONDS`, and `_POLL_SECONDS` are exposed through the
+non-secret `system/info` summary for the console Settings view. Rate limiting
+is best-effort client-side spacing plus 429 backoff, not a provider quota
+claim.
+
+The M7/P9 boundary stands: `/voice-sessions/{id}/say` stays 404. Generated
+assets are operator-reviewed campaign material; nothing synthesized here is
+injected into a running call.
+
 ## CRM integration — Squid (first integration, verified against source)
 
 The Squid adapter (`crm/sqib…squid.py`) was written against verified client
@@ -95,15 +131,19 @@ This keeps the pipeline semantics testable without carrying an audio stack.
 ## AI runtime (Python)
 
 `services/ai-runtime` implements the agent-turn contract: a deterministic,
-script-driven `MockAgent` that honestly reports `real_llm: False` in its
-capabilities. No real LLM client exists in this build.
+script-driven `MockAgent` (`real_llm: False`) and an opt-in `OpenRouterAgent`
+(`real_llm: True`) selected by `VOXORA_LLM_PROVIDER`. Neither is exercised live
+by tests or the demo.
 
 ## Console (React)
 
 Single-page operator console (Vite + TS). Token → tenant from
 `VOXORA_API_TOKENS`; tabs for overview, campaigns (lifecycle actions),
-contacts, and calls. `/api` is proxied to the orchestrator in dev (Vite) and
-prod (nginx).
+contacts, calls, voice turn diagnostics, and audio generation. The audio tab
+has Generate / Batch / Library / Processing / Settings views and uses the
+OpenAPI-generated `paths.ts`/`apiTypes.ts` plus hand-typed response envelopes
+in `api.ts`. `/api` is proxied to the orchestrator in dev (Vite) and prod
+(nginx).
 
 ## Enforcement of honesty
 

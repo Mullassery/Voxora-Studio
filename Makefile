@@ -1,4 +1,4 @@
-.PHONY: install dev test lint typecheck web-install web-build rust-test py-voice ts-client verify
+.PHONY: install dev test lint typecheck web-install web-build rust-test py-voice py-install uv-sync ts-client verify
 install:
 	python3 -m venv .venv && .venv/bin/pip install -e "services/orchestrator[dev,postgres]"
 dev:
@@ -20,4 +20,12 @@ rust-test:
 py-voice:
 	.venv/bin/pip install "maturin>=1.5,<2"
 	cd crates/voice-runtime && VIRTUAL_ENV="$(CURDIR)/.venv" ../../.venv/bin/maturin develop --release
+py-install:
+	.venv/bin/pip install -e "services/ai-runtime[dev]"
+	.venv/bin/pip install -e "services/orchestrator[dev]"
+	.venv/bin/pip install -e crates/voice-runtime
+uv-sync:
+	uv sync --all-packages --project "$(CURDIR)"
+uv-refresh:
+	uv sync --all-packages --project "$(CURDIR)" --reinstall
 verify: lint typecheck test web-build rust-test

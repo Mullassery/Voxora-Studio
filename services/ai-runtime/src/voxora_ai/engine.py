@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
 _END_KEYWORDS = ("goodbye", "bye", "stop calling", "end call")
 _CLOSING = "Understood. Ending the simulated call now. Goodbye."
@@ -17,6 +17,27 @@ _CLOSING = "Understood. Ending the simulated call now. Goodbye."
 
 class AgentTurnError(Exception):
     """The backend was used incorrectly (out-of-order calls)."""
+
+
+@runtime_checkable
+class AgentBrain(Protocol):
+    """Optional conversation-policy hook, for downstream products.
+
+    Voxora owns the call lifecycle and (when configured) the model call; a
+    brain may take over per-turn wording or end-call decisions. Returning
+    ``None`` hands the turn back to Voxora's default phrasing. Implementing
+    this does not create any Voxora dependency in the brain."""
+
+    def respond(self, user_text: str, history: List[Dict[str, str]]) -> Optional["AgentReply"]:
+        """Return the next agent turn, or ``None`` to defer to the engine."""
+        ...
+
+
+def turn_from_reply(reply: Optional[AgentReply], fallback_reply: AgentReply) -> AgentReply:
+    """Prefer the brain's turn (including its explicit end_call), else the engine's."""
+    if reply is None or (not reply.text.strip() and not reply.ended):
+        return fallback_reply
+    return reply
 
 
 @dataclass(frozen=True)
@@ -66,6 +87,25 @@ class MockAgent:
         self._turn = 0
         self._started = True
         return self._reply()
+
+    def rearm(self) -> None:
+        """Re-arm for a resumed live session; no reply is (re-)spoken.
+
+        The opening line already went out when the session first started;
+        resume only restores the script position so the next `respond`
+        continues the script instead of repeating it.
+        """
+        self._turn = 0
+        self._started = True
+
+    def export_state(self) -> Dict[str, Any]:
+        """Durable agent cursor for session-durable conversation state."""
+        return {"script_index": self._turn, "started": self._started}
+
+    def import_state(self, state: Dict[str, Any]) -> None:
+        """Restore the cursor persisted by `export_state` (same conversation)."""
+        self._turn = int(state.get("script_index") or 0)
+        self._started = bool(state.get("started", True))
 
     def respond(self, user_text: str) -> AgentReply:
         if not self._started:
