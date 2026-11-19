@@ -316,4 +316,11 @@ class Settings:
             "liveCallsEnabled": self.allow_live_calls,
             "workerEnabled": self.worker_enabled,
             "seedDemo": self.seed_demo,
+            "audio_provider": self.audio_tts_provider,
+            "audio_storage_path": self.audio_storage_path,
+            "audio_batch_max_records": self.audio_batch_max_records,
+            "audio_batch_claim_size": self.audio_batch_claim_size,
+            "audio_batch_rate_per_minute": self.audio_batch_rate_per_minute,
+            "audio_batch_rate_limit_backoff_seconds": self.audio_batch_rate_limit_backoff_seconds,
+            "audio_batch_poll_seconds": self.audio_batch_poll_seconds,
         }

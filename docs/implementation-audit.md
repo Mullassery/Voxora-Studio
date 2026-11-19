@@ -292,8 +292,9 @@ surface, deliberately separate from the live call path):
 Verified this session: `test_tts_generation.py` (11) + `test_audio_assets.py`
 (22, SQLite + Postgres) + `test_audio_api.py` (6) — full suite 356 green,
 ruff clean, mypy clean apart from the pre-existing pyreverseetl
-import-untyped note. Remaining Phase C-G (variants/post-processing, script
-chunking + long-form, batch/background jobs) are planned, not claimed.
+import-untyped note. At that point Phases C-G (variants/post-processing, script
+chunking + long-form, batch/background jobs) were still planned; their shipped
+state is recorded in the later sections below.
 
 ## M10 Audio Generation, Phase C — non-destructive variants (2026-11-13, verified this session)
 
@@ -337,8 +338,9 @@ of the pipeline (calls enhanced on the way in, assets enhanced on the way out).
   never clamped).
 
 Verified this session: orchestrator suite 392 green (SQLite + Postgres),
-ruff clean, mypy clean (repo config), cargo 131 green. Phase D (long-form
-chunking) and Phase E (batch/background) remain planned, not claimed.
+ruff clean, mypy clean (repo config), cargo 131 green. At that point Phase D
+(long-form chunking) and Phase E (batch/background) were still planned; both
+shipped later, as recorded below.
 
 ## M10 Audio Generation, Phase D — long-form generation (2026-11-13, verified this session)
 
@@ -387,8 +389,9 @@ regeneration):
   remedy in the message.
 
 Verified this session: orchestrator + ai-runtime suite 441 green (SQLite +
-Postgres), ruff clean, mypy clean (repo config). Phase E (batch/background),
-Phase F (console UI), Phase G remain planned, not claimed.
+Postgres), ruff clean, mypy clean (repo config). At that point Phase E
+(batch/background), Phase F (console UI), and Phase G were still planned; all
+three shipped later, as recorded below.
 
 Phase D whole-branch review (fresh reviewer, base 5481a44 → 28013a5) — fixed
 in commit 28013a5: (1) assembly catch broadened to
@@ -406,8 +409,75 @@ guard (a provider echoing a different format than requested honestly fails
 that chunk), softened chunker docstring (verbatim guarantee is
 paragraph-merge level; retry stability rests on stored texts, not source
 reconstruction). Deferred minors (not fixed, accepted): per-chunk manifest
-rewrites the full history JSON each chunk (bounded, Phase E should move to
-the worker with a DB-level claim); download of a `failed` asset is 404
+rewrites the full history JSON each chunk in the synchronous long-form HTTP
+route (the Phase E batch surface now runs long rows in the audio worker with a
+DB-level claim, but that HTTP route is unchanged); download of a `failed` asset is 404
 `file_missing` (spec pinned only `processing`); retry test asserts provider
 call-count rather than byte-identity (deliberately — stronger and
 implementation-agnostic).
+
+## M10 Audio Generation, Phases E-G (2026-11-20, verified this session)
+
+Phase E closes the batch half of the PRODUCE surface. Commit checkpoints:
+`c202bd1` (execution map), `40f121d` (batch backend), `64c9d89` (console).
+
+- **Persistence** (`db.py`, `models.py`): additive `audio_batch_jobs` and
+  `audio_batch_items` tables on SQLite + Postgres with JSON `defaults`/
+  `settings` columns, per-tenant scoping, row-level status/attempts/error/
+  rate-limited/next-attempt fields. New seams: `create_audio_batch`,
+  `get_audio_batch`, `list_audio_batches`, `list_audio_batch_items`,
+  `claim_audio_batch_items`, `complete_audio_batch_item`,
+  `retry_failed_audio_batch_items`; `recover_inflight()` also requeues stale
+  batch items and their jobs. Failed retries preserve `asset_id` so a partial
+  long-form run is completed, not regenerated from scratch (bug found and fixed
+  by the new test).
+- **Intake + worker** (`audio_batches.py`): CSV parser accepts
+  `script,title,voice,language,speed,model,response_format,instructions`
+  (`script` required), rejects unknown/duplicate headers, reports row-numbered
+  errors, applies defaults, fills a missing title, and routes long rows to the
+  existing `generate_long_form` engine (WAV/PCM only, as before). A 200-row cap
+  is configurable. `AudioBatchEngine` runs bounded claim cycles;
+  `BatchRateLimiter` spaces requests and backs off on 429s using injectable
+  clock/sleep. This is client-side behavior only — no provider quota is
+  claimed or simulated. `AudioBatchWorker` is a separate daemon thread started
+  from the API lifespan when `worker_enabled`; it never reuses the campaign
+  worker or touches the live call path.
+- **API** (`api.py`): `POST /api/v1/audio/batches/preview`,
+  `POST /api/v1/audio/batches`, `GET /api/v1/audio/batches`,
+  `GET /api/v1/audio/batches/{id}`, `POST /api/v1/audio/batches/process`,
+  `POST /api/v1/audio/batches/{id}/retry-failed`, and
+  `GET /api/v1/audio/batches/{id}/report` (CSV download). Multipart intake uses
+  the standard bearer auth, writer gating, tenant isolation, and audits
+  (`audio.batch_created`, `audio.batch_retried`); unconfigured provider → 501
+  `audio_provider_unconfigured`, no failed records → 409
+  `batch_no_failed_items`. The `/process` route runs ONE bounded cycle rather
+  than blocking until the batch completes.
+- **Tests** (`test_audio_batches.py`, `test_audio_batch_api.py`): 26 new tests
+  with `MockTTSProvider`, fail-once stubs, and injectable limiter time — CSV
+  validation/row errors, tenant isolation, writer gating, provider-boundary
+  pin, claim/process/report, retry-of-failed-only, partial long-form retry
+  reuse, and 501/409 error contracts. No paid API calls.
+
+Phase F adds the operator surface without redesigning the dashboard:
+`make ts-client` regenerated `apiTypes.ts`/`paths.ts` from OpenAPI; `api.ts`
+gained audio provider/generate/list/delete/download, batch preview/create/
+list/detail/process/retry/report methods, multipart upload, blob downloads,
+and error-code parsing; `AudioGeneration.tsx` adds Generate / Batch / Library /
+Processing / Settings inside a new `audio` tab. Provider banners explicitly say
+`Mock provider: simulated audio` or `No TTS provider configured` (generation
+disabled, 501), and warn when a live provider is configured. The console never
+injects produced audio into a live call; the M7/P9 `/voice-sessions/{id}/say`
+404 boundary is pinned beside the new surface.
+
+Phase G sweep: fixed the duplicated voice-boost test (ruff F811), the
+`test_longform_api.py` monkeypatch target, the CSV missing-title default bug,
+and the partial-asset retry bug noted above. Verification: `make verify`
+(lint, typecheck, pytest, web build, Rust tests), `468 passed in 53.89s`
+Python (SQLite + Postgres), `134 passed` Rust, console production build clean,
+ruff/mypy clean, and `graphify update .` rebuilt the graph. `system/info` now
+exposes only non-secret audio provider/batch settings (pinned by test) so the
+console Settings view is real, not decorative. Honest boundaries:
+the long-form HTTP route remains synchronous (bounded by the 64-chunk cap);
+batch long rows run in the dedicated worker; multi-worker deployments would
+need a shared lease; rate limits are approximate client-side pacing, not a
+provider contract; no live telephony or paid TTS path was exercised.

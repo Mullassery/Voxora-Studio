@@ -286,29 +286,29 @@ one). Phased delivery per the implementation spec (repo inspection → TTS
 abstraction → generation API → assets → console UI → long-form → batch →
 post-processing → tests → docs); each phase ends testable.
 
-**Status: Phases A–D shipped and review-clean (2026-11-13) — provider
+**Status: Phases A–G shipped and review-clean (2026-11-20) — provider
 abstraction, generation API + asset library, non-destructive variants,
-long-form chunking/assembly/retry. Pending: Phase E (CSV batch generation
-with background worker processing), Phase F (console Audio Generation
-section), Phase G (tests + docs sweep).**
+long-form chunking/assembly/retry, CSV batch generation with a dedicated
+background worker, console Audio Generation section, and the mocked-provider
+test/docs sweep.**
 
 **Execution map (2026-11-20):** All new surfaces use the deterministic mock
 provider / explicit stubs — no paid API calls or live services in the standard
 suite or console demo paths.
 
-- [ ] **E — Persistence.** DB schema + methods for audio batch jobs/items
+- [x] **E — Persistence.** DB schema + methods for audio batch jobs/items
       (SQLite + Postgres), claim/retry/report seams.
-- [ ] **E — Intake + worker.** CSV parsing/validation, batch engine, background
+- [x] **E — Intake + worker.** CSV parsing/validation, batch engine, background
       worker, rate-limit awareness.
-- [ ] **E — API.** Preview/create/list/detail/retry/report endpoints +
+- [x] **E — API.** Preview/create/list/detail/retry/report endpoints +
       Pydantic models.
-- [ ] **E — Tests.** Mocked-provider / stub tests for CSV validation, worker,
+- [x] **E — Tests.** Mocked-provider / stub tests for CSV validation, worker,
       retry, report.
-- [ ] **F — Console.** Regenerate TS client, add audio API methods, build Audio
+- [x] **F — Console.** Regenerate TS client, add audio API methods, build Audio
       Generation section (Generate / Batch / Library / Processing / Settings).
-- [ ] **G — Tests + docs.** Full test sweep, fix known test leaks, docs
+- [x] **G — Tests + docs.** Full test sweep, fix known test leaks, docs
       (architecture/provider/honesty/audit/roadmap).
-- [ ] **Verification.** Run full verification (ruff, mypy, pytest, web build)
+- [x] **Verification.** Run full verification (ruff, mypy, pytest, web build)
       and graphify update.
 
 - [x] **Phase A — TTS provider abstraction + first provider.**
@@ -352,16 +352,16 @@ suite or console demo paths.
   ordered sequential assembly, consistent voice settings across chunks,
   per-chunk failure tracking with retry-without-regeneration, assembled-file
   validation.
-- [ ] **Phase E — Batch generation.** CSV intake with structure validation and
+- [x] **Phase E — Batch generation.** CSV intake with structure validation and
   preview, default + per-record voice, background processing through the
   worker-loop pattern (never blocking the call worker or real-time paths),
   per-record status, retry of failed records only, downloadable generation
   report, provider rate-limit awareness.
-- [ ] **Phase F — Console Audio Generation section.** Generate / Batch /
+- [x] **Phase F — Console Audio Generation section.** Generate / Batch /
   Library / Processing / Settings views inside the existing console design
   language and navigation (no dashboard redesign); generated TS client types
   follow the OpenAPI generation convention.
-- [ ] **Phase G — Tests + docs.** Mocked-provider tests only (zero paid API
+- [x] **Phase G — Tests + docs.** Mocked-provider tests only (zero paid API
   calls in the standard suite): generation, provider abstraction, voice/language
   selection, format validation/conversion, chunking, assembly, batch
   validation/retries, storage, download authorization, failure handling. Full

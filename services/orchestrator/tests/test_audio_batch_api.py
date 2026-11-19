@@ -136,3 +136,12 @@ def test_list_batches_uses_page_envelope(client: TestClient) -> None:
     body = client.get("/api/v1/audio/batches", headers=AUTH).json()
     assert body["pageInfo"]["total"] == 1
     assert body["pageInfo"]["hasNextPage"] is False
+
+
+def test_system_info_exposes_audio_settings_without_secrets(client: TestClient) -> None:
+    body = client.get("/api/v1/system/info", headers=AUTH).json()
+    settings = body["settings"]
+    assert settings["audio_provider"] == "mock"
+    assert settings["audio_batch_max_records"] == 200
+    assert settings["audio_batch_rate_per_minute"] == 60
+    assert "api_key" not in json.dumps(settings).lower()
