@@ -102,3 +102,79 @@ input {
   border: 1px solid #232c3d;
   border-radius: 8px;
 }
+
+textarea {
+  background: #0b0f16;
+  color: inherit;
+  border: 1px solid #35455f;
+  border-radius: 6px;
+  padding: 0.45rem 0.7rem;
+  font: inherit;
+  resize: vertical;
+}
+
+.audio-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.75rem 0;
+}
+
+.audio-view {
+  margin-top: 0.75rem;
+}
+
+.audio-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid #232c3d;
+  border-radius: 8px;
+}
+
+.audio-form label,
+.audio-actions label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+}
+
+.audio-form label.inline {
+  flex-direction: row;
+  align-items: center;
+}
+
+.audio-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0.6rem;
+}
+
+.audio-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.5rem;
+  margin: 0.6rem 0;
+}
+
+.audio-banner {
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #2f6a4f;
+  border-radius: 6px;
+  color: #a8e6c5;
+}
+
+.audio-banner.warn {
+  border-color: #6a5a2f;
+  color: #e6d1a8;
+}
+
+.audio-result {
+  margin-top: 1rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid #232c3d;
+  border-radius: 8px;
+}

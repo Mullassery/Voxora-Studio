@@ -12,6 +12,7 @@ import {
   TurnEvent,
   TurnFeedResult,
 } from "./api";
+import { AudioGeneration } from "./AudioGeneration";
 
 interface CampaignTemplate {
   label: string;
@@ -50,7 +51,7 @@ const TEMPLATES: CampaignTemplate[] = [
   },
 ];
 
-type Tab = "overview" | "campaigns" | "contacts" | "calls" | "voice";
+type Tab = "overview" | "campaigns" | "contacts" | "calls" | "voice" | "audio";
 
 const TOKEN_KEY = "voxora-token";
 const ACTIONS = ["start", "pause", "resume", "cancel"] as const;
@@ -138,7 +139,7 @@ export function App() {
       <header>
         <h1>Voxora Studio</h1>
         <nav>
-          {(["overview", "campaigns", "contacts", "calls", "voice"] as Tab[]).map((name) => (
+          {(["overview", "campaigns", "contacts", "calls", "voice", "audio"] as Tab[]).map((name) => (
             <button key={name} className={tab === name ? "active" : ""} onClick={() => setTab(name)}>
               {name}
             </button>
@@ -154,6 +155,7 @@ export function App() {
       {tab === "contacts" && <Contacts api={api} onError={setError} />}
       {tab === "calls" && <Calls api={api} onError={setError} />}
       {tab === "voice" && <VoiceTurn api={api} onError={setError} />}
+      {tab === "audio" && <AudioGeneration api={api} onError={setError} />}
     </main>
   );
 }
