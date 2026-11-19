@@ -106,6 +106,11 @@ class Settings:
     voice_provider_chains: Dict[str, List[str]] = field(default_factory=dict)
     audio_tts_provider: str = "mock"
     audio_storage_path: str = "data/audio_assets"
+    audio_batch_max_records: int = 200
+    audio_batch_claim_size: int = 5
+    audio_batch_rate_per_minute: int = 60
+    audio_batch_rate_limit_backoff_seconds: float = 5.0
+    audio_batch_poll_seconds: float = 0.5
     openai_api_key: Optional[str] = None
     log_level: str = "INFO"
 
@@ -145,6 +150,13 @@ class Settings:
             webhook_transport=os.getenv("VOXORA_WEBHOOK_TRANSPORT", "direct").strip().lower(),
             audio_tts_provider=os.getenv("VOXORA_AUDIO_TTS_PROVIDER", "mock").strip().lower(),
             audio_storage_path=os.getenv("VOXORA_AUDIO_STORAGE_PATH", "data/audio_assets"),
+            audio_batch_max_records=_int(os.getenv("VOXORA_AUDIO_BATCH_MAX_RECORDS"), 200),
+            audio_batch_claim_size=_int(os.getenv("VOXORA_AUDIO_BATCH_CLAIM_SIZE"), 5),
+            audio_batch_rate_per_minute=_int(os.getenv("VOXORA_AUDIO_BATCH_RATE_PER_MINUTE"), 60),
+            audio_batch_rate_limit_backoff_seconds=_float(
+                os.getenv("VOXORA_AUDIO_BATCH_RATE_LIMIT_BACKOFF_SECONDS"), 5.0
+            ),
+            audio_batch_poll_seconds=_float(os.getenv("VOXORA_AUDIO_BATCH_POLL_SECONDS"), 0.5),
             openai_api_key=os.getenv("OPENAI_API_KEY") or None,
             webhook_dead_letter_path=os.getenv("VOXORA_WEBHOOK_DEAD_LETTER_PATH") or None,
             webhook_max_attempts=_int(os.getenv("VOXORA_WEBHOOK_MAX_ATTEMPTS"), 3),
@@ -280,6 +292,16 @@ class Settings:
             raise ValueError("VOXORA_TRANSCRIPT_CHECKPOINT_INTERVAL_SECONDS must be > 0")
         if self.transcript_checkpoint_queue_size < 1:
             raise ValueError("VOXORA_TRANSCRIPT_CHECKPOINT_QUEUE_SIZE must be >= 1")
+        if self.audio_batch_max_records < 1:
+            raise ValueError("VOXORA_AUDIO_BATCH_MAX_RECORDS must be >= 1")
+        if self.audio_batch_claim_size < 1:
+            raise ValueError("VOXORA_AUDIO_BATCH_CLAIM_SIZE must be >= 1")
+        if self.audio_batch_rate_per_minute < 0:
+            raise ValueError("VOXORA_AUDIO_BATCH_RATE_PER_MINUTE must be >= 0 (0 disables)")
+        if self.audio_batch_rate_limit_backoff_seconds < 0:
+            raise ValueError("VOXORA_AUDIO_BATCH_RATE_LIMIT_BACKOFF_SECONDS must be >= 0")
+        if self.audio_batch_poll_seconds <= 0:
+            raise ValueError("VOXORA_AUDIO_BATCH_POLL_SECONDS must be > 0")
         if self.voice_provider_adapters or self.voice_provider_chains:
             # Deferred import: voice_providers imports Settings from here;
             # the pyreverseetl availability check above is the same pattern.

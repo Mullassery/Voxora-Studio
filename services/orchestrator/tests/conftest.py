@@ -40,6 +40,8 @@ _PG_TABLES = [
     "voice_sessions",
     "voice_boost_settings",
     "audio_assets",
+    "audio_batch_items",
+    "audio_batch_jobs",
     "webhook_events",
 ]
 
@@ -95,6 +97,7 @@ def settings(tmp_path: Path) -> Settings:
         simulated_call_delay_seconds=0.0,
         worker_threads=1,
         global_concurrency=5,
+        audio_storage_path=str(tmp_path / "audio-assets"),
     )
 
 

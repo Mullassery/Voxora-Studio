@@ -38,6 +38,8 @@ JSON_COLUMNS = {
     "transcript",
     "voice_boost",
     "processing_history",
+    "defaults",
+    "settings",
 }
 
 MODEL_PROFILE_TASKS = ("turn", "analyze")
@@ -432,6 +434,47 @@ CREATE TABLE IF NOT EXISTS audio_assets (
 );
 CREATE INDEX IF NOT EXISTS idx_audio_assets_tenant ON audio_assets(tenant_id, created_at);
 
+CREATE TABLE IF NOT EXISTS audio_batch_jobs (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    status TEXT NOT NULL,
+    defaults TEXT NOT NULL DEFAULT '{}',
+    total INTEGER NOT NULL DEFAULT 0,
+    completed INTEGER NOT NULL DEFAULT 0,
+    failed INTEGER NOT NULL DEFAULT 0,
+    rate_limited INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_audio_batch_jobs_tenant ON audio_batch_jobs(tenant_id, created_at);
+
+CREATE TABLE IF NOT EXISTS audio_batch_items (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    batch_id TEXT NOT NULL,
+    row_number INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    script TEXT NOT NULL,
+    voice TEXT NOT NULL,
+    language TEXT,
+    status TEXT NOT NULL,
+    asset_id TEXT,
+    error TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    rate_limited INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    settings TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(batch_id, row_number)
+);
+CREATE INDEX IF NOT EXISTS idx_audio_batch_items_tenant ON audio_batch_items(tenant_id, batch_id, row_number);
+CREATE INDEX IF NOT EXISTS idx_audio_batch_items_claim ON audio_batch_items(status, next_attempt_at, created_at);
+
 CREATE TABLE IF NOT EXISTS ai_usage (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
@@ -805,6 +848,201 @@ class Database:
                 (tenant_id,),
             ).fetchall()
         return {row["status"]: int(row["n"]) for row in rows}
+
+    # ------------------------------------------------------- audio batch jobs
+    def create_audio_batch(
+        self,
+        tenant_id: str,
+        filename: str,
+        defaults: Dict[str, Any],
+        records: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Create a job and all its CSV rows in one tenant-scoped transaction."""
+        now = iso()
+        batch_id = new_id("abt")
+        with self._write() as connection:
+            connection.execute(
+                "INSERT INTO audio_batch_jobs (id, tenant_id, filename, status, defaults,"
+                " total, created_at, updated_at) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?)",
+                (batch_id, tenant_id, filename, json.dumps(defaults), len(records), now, now),
+            )
+            for record in records:
+                connection.execute(
+                    "INSERT INTO audio_batch_items (id, tenant_id, batch_id, row_number, title,"
+                    " script, voice, language, status, settings, created_at, updated_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)",
+                    (
+                        new_id("abi"),
+                        tenant_id,
+                        batch_id,
+                        int(record["row_number"]),
+                        record["title"],
+                        record["script"],
+                        record["voice"],
+                        record.get("language"),
+                        json.dumps(record.get("settings", {})),
+                        now,
+                        now,
+                    ),
+                )
+        return self.get_audio_batch(tenant_id, batch_id)  # type: ignore[return-value]
+
+    def get_audio_batch(
+        self, tenant_id: str, batch_id: str
+    ) -> Optional[Dict[str, Any]]:
+        with self._read() as connection:
+            row = connection.execute(
+                "SELECT * FROM audio_batch_jobs WHERE tenant_id=? AND id=?",
+                (tenant_id, batch_id),
+            ).fetchone()
+        if row is None:
+            return None
+        job = self._decode(row)
+        job["items"] = self.list_audio_batch_items(tenant_id, batch_id)
+        return job
+
+    def list_audio_batches(
+        self, tenant_id: str, limit: int = 50, offset: int = 0
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        with self._read() as connection:
+            total = connection.execute(
+                "SELECT COUNT(*) AS n FROM audio_batch_jobs WHERE tenant_id=?", (tenant_id,)
+            ).fetchone()["n"]
+            rows = connection.execute(
+                "SELECT * FROM audio_batch_jobs WHERE tenant_id=?"
+                " ORDER BY created_at DESC, id LIMIT ? OFFSET ?",
+                (tenant_id, limit, offset),
+            ).fetchall()
+        return [self._decode(row) for row in rows], int(total)
+
+    def list_audio_batch_items(
+        self, tenant_id: str, batch_id: str
+    ) -> List[Dict[str, Any]]:
+        with self._read() as connection:
+            rows = connection.execute(
+                "SELECT * FROM audio_batch_items WHERE tenant_id=? AND batch_id=?"
+                " ORDER BY row_number ASC",
+                (tenant_id, batch_id),
+            ).fetchall()
+        return [self._decode(row) for row in rows]
+
+    def claim_audio_batch_items(self, limit: int) -> List[Dict[str, Any]]:
+        """Atomically claim queued items from live jobs (never call work)."""
+        now = iso()
+        claimed: List[Dict[str, Any]] = []
+        with self._write() as connection:
+            self._claim_prelude(connection)
+            rows = connection.execute(
+                "SELECT i.*, j.defaults FROM audio_batch_items i"
+                " JOIN audio_batch_jobs j ON j.id=i.batch_id"
+                " WHERE i.status='queued' AND j.status IN ('queued','processing')"
+                " AND (i.next_attempt_at IS NULL OR i.next_attempt_at <= ?)"
+                " ORDER BY i.created_at ASC, i.row_number ASC LIMIT ?"
+                + self._claim_row_lock(),
+                (now, limit),
+            ).fetchall()
+            for row in rows:
+                update = connection.execute(
+                    "UPDATE audio_batch_items SET status='processing', attempts=attempts+1,"
+                    " updated_at=? WHERE id=? AND status='queued'",
+                    (now, row["id"]),
+                )
+                if getattr(update, "rowcount", 1) != 1:
+                    continue
+                connection.execute(
+                    "UPDATE audio_batch_jobs SET status='processing',"
+                    " started_at=COALESCE(started_at, ?), updated_at=?"
+                    " WHERE id=? AND tenant_id=? AND status IN ('queued','processing')",
+                    (now, now, row["batch_id"], row["tenant_id"]),
+                )
+                item = self._decode(row)
+                item["attempts"] = int(row["attempts"]) + 1
+                claimed.append(item)
+        return claimed
+
+    def complete_audio_batch_item(
+        self,
+        tenant_id: str,
+        batch_id: str,
+        item_id: str,
+        *,
+        status: str,
+        asset_id: Optional[str] = None,
+        error: Optional[str] = None,
+        rate_limited: bool = False,
+        next_attempt_at: Optional[str] = None,
+    ) -> None:
+        """Finish one item and recompute its job counters in one transaction."""
+        now = iso()
+        with self._write() as connection:
+            update = connection.execute(
+                "UPDATE audio_batch_items SET status=?, asset_id=?, error=?, rate_limited=?,"
+                " next_attempt_at=?, updated_at=?"
+                " WHERE tenant_id=? AND batch_id=? AND id=?",
+                (
+                    status,
+                    asset_id,
+                    error,
+                    int(bool(rate_limited)),
+                    next_attempt_at,
+                    now,
+                    tenant_id,
+                    batch_id,
+                    item_id,
+                ),
+            )
+            if getattr(update, "rowcount", 1) != 1:
+                return
+            rows = connection.execute(
+                "SELECT status, rate_limited FROM audio_batch_items WHERE batch_id=?",
+                (batch_id,),
+            ).fetchall()
+            completed = sum(1 for row in rows if row["status"] == "ready")
+            failed = sum(1 for row in rows if row["status"] == "failed")
+            throttled = sum(int(bool(row["rate_limited"])) for row in rows)
+            pending = any(row["status"] in ("queued", "processing") for row in rows)
+            connection.execute(
+                "UPDATE audio_batch_jobs SET completed=?, failed=?, rate_limited=?, status=?,"
+                " completed_at=?, updated_at=? WHERE tenant_id=? AND id=?",
+                (
+                    completed,
+                    failed,
+                    throttled,
+                    "processing" if pending else "completed",
+                    None if pending else now,
+                    now,
+                    tenant_id,
+                    batch_id,
+                ),
+            )
+
+    def retry_failed_audio_batch_items(
+        self, tenant_id: str, batch_id: str
+    ) -> Optional[Tuple[int, Dict[str, Any]]]:
+        """Requeue FAILED items only; ready items are never regenerated."""
+        now = iso()
+        with self._write() as connection:
+            job = connection.execute(
+                "SELECT * FROM audio_batch_jobs WHERE tenant_id=? AND id=?",
+                (tenant_id, batch_id),
+            ).fetchone()
+            if job is None:
+                return None
+            cursor = connection.execute(
+                "UPDATE audio_batch_items SET status='queued', error=NULL,"
+                " rate_limited=0, next_attempt_at=NULL, updated_at=?"
+                " WHERE tenant_id=? AND batch_id=? AND status='failed'",
+                (now, tenant_id, batch_id),
+            )
+            count = int(getattr(cursor, "rowcount", 0))
+            connection.execute(
+                "UPDATE audio_batch_jobs SET status=?, error=NULL, completed_at=NULL,"
+                " updated_at=? WHERE tenant_id=? AND id=?",
+                (job["status"] if count == 0 else "queued", now, tenant_id, batch_id),
+            )
+        refreshed = self.get_audio_batch(tenant_id, batch_id)
+        assert refreshed is not None
+        return count, refreshed
 
     # --------------------------------------------------------------- ai usage
     def record_ai_usage(
@@ -1822,6 +2060,25 @@ class Database:
                     (target, now, "Recovered after worker restart", now, orphan["id"]),
                 )
                 recovered += 1
+            # Batch items claimed by a dead worker are retryable: the item's
+            # provider call may never have reached the provider, so the job
+            # returns to `queued` with only those items requeued.
+            stranded = connection.execute(
+                "SELECT id FROM audio_batch_items WHERE status='processing'"
+            ).fetchall()
+            for item in stranded:
+                connection.execute(
+                    "UPDATE audio_batch_items SET status='queued', next_attempt_at=?, error=?,"
+                    " updated_at=? WHERE id=?",
+                    (now, "Recovered after worker restart", now, item["id"]),
+                )
+                recovered += 1
+            connection.execute(
+                "UPDATE audio_batch_jobs SET status='queued', updated_at=?"
+                " WHERE status='processing' AND EXISTS (SELECT 1 FROM audio_batch_items i"
+                " WHERE i.batch_id=audio_batch_jobs.id AND i.status='queued')",
+                (now,),
+            )
         return recovered
 
     # ------------------------------------------------------------------- calls

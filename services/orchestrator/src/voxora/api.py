@@ -9,13 +9,21 @@ from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, OrderedDict, Tuple
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
+from pydantic import ValidationError
 
 from . import __version__
 from .audio_assets import AudioFileStore, AudioGenerationError, generate_asset
+from .audio_batches import (
+    AudioBatchEngine,
+    AudioBatchWorker,
+    BatchCsvError,
+    batch_report_csv,
+    parse_batch_csv,
+)
 from .campaign import CampaignEngine, CampaignError
 from .config import Settings, TenantPrincipal
 from .crm import build_crm_adapter, provider_catalog
@@ -27,6 +35,7 @@ from .models import (
     AiDecideRequest,
     AudienceImport,
     AudioAssetGenerate,
+    AudioBatchDefaults,
     CampaignCreate,
     CampaignSyncRequest,
     ConsentUpdate,
@@ -269,12 +278,26 @@ async def lifespan(app: FastAPI):
         worker = CampaignWorker(app.state.engine, poll_seconds=settings.worker_poll_seconds)
         worker.start()
         app.state.worker = worker
+    # Phase E: a SEPARATE daemon loop with its own bounded claim. It never
+    # shares the campaign worker's queue, threads, or the live call path.
+    app.state.audio_batch_engine = AudioBatchEngine(app.state.db, settings)
+    app.state.audio_batch_worker = None
+    if settings.worker_enabled:
+        audio_worker = AudioBatchWorker(
+            app.state.audio_batch_engine,
+            poll_seconds=settings.audio_batch_poll_seconds,
+        )
+        audio_worker.start()
+        app.state.audio_batch_worker = audio_worker
     try:
         yield
     finally:
         worker = app.state.worker
         if worker:
             worker.stop()
+        audio_worker = app.state.audio_batch_worker
+        if audio_worker:
+            audio_worker.stop()
 
 
 def _principal_from_request(request: Request) -> TenantPrincipal:
@@ -1452,6 +1475,150 @@ def create_app(
                 "detail": str(error),
             }
         return {"configured_provider": settings.audio_tts_provider, **status}
+
+    # --------------------------------------- audio CSV batches (M10 Phase E)
+    def _batch_defaults(raw: str) -> Dict[str, Any]:
+        try:
+            return AudioBatchDefaults.model_validate_json(raw or "{}").model_dump()
+        except ValidationError as error:
+            raise ApiError(
+                422,
+                "invalid batch defaults",
+                "batch_defaults_invalid",
+                [str(item.get("msg", "invalid")) for item in error.errors()],
+            ) from None
+
+    def _require_audio_provider_configured() -> None:
+        try:
+            build_tts_provider(app.state.settings)
+        except ValueError as error:
+            raise ApiError(501, str(error), "audio_provider_unconfigured") from None
+
+    @app.post("/api/v1/audio/batches/preview")
+    async def preview_audio_batch(
+        file: UploadFile = File(...),
+        defaults: str = Form("{}"),
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        """Validate a CSV and return a row-level preview without queuing work."""
+        parsed = _batch_defaults(defaults)
+        try:
+            result = parse_batch_csv(
+                await file.read(), parsed, settings.audio_batch_max_records
+            )
+        except BatchCsvError as error:
+            raise ApiError(422, str(error), "batch_csv_invalid") from None
+        return {
+            "filename": file.filename or "batch.csv",
+            "columns": result["columns"],
+            "rowCount": result["rowCount"],
+            "validCount": result["validCount"],
+            "errors": result["errors"],
+            "preview": result["preview"],
+        }
+
+    @app.post("/api/v1/audio/batches", status_code=201)
+    async def create_audio_batch(
+        file: UploadFile = File(...),
+        defaults: str = Form("{}"),
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        """Queue one CSV batch; the audio worker processes it in the background."""
+        _require_writer(principal)
+        _require_audio_provider_configured()
+        parsed = _batch_defaults(defaults)
+        try:
+            result = parse_batch_csv(
+                await file.read(), parsed, settings.audio_batch_max_records
+            )
+        except BatchCsvError as error:
+            raise ApiError(422, str(error), "batch_csv_invalid") from None
+        job = app.state.db.create_audio_batch(
+            principal.tenant_id,
+            file.filename or "batch.csv",
+            parsed,
+            result["records"],
+        )
+        app.state.db.audit(
+            principal.tenant_id,
+            principal.name,
+            "audio.batch_created",
+            "audio_batch",
+            job["id"],
+            {"total": job["total"], "filename": job["filename"]},
+        )
+        return job
+
+    @app.get("/api/v1/audio/batches")
+    def list_audio_batches(
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        items, total = app.state.db.list_audio_batches(principal.tenant_id, limit, offset)
+        return _page(items, total, limit, offset)
+
+    @app.get("/api/v1/audio/batches/{batch_id}")
+    def get_audio_batch(
+        batch_id: str,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        job = app.state.db.get_audio_batch(principal.tenant_id, batch_id)
+        if job is None:
+            raise ApiError(404, "audio batch not found", "not_found")
+        return job
+
+    @app.post("/api/v1/audio/batches/process")
+    def process_audio_batch_now(
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        """Run ONE bounded claim cycle on demand (used by the Processing view).
+
+        This uses the dedicated audio engine — never the campaign/call worker —
+        and returns immediately after the bounded cycle, not after the batch.
+        """
+        _require_writer(principal)
+        _require_audio_provider_configured()
+        processed = app.state.audio_batch_engine.run_once()
+        return {"processed": processed, "claimSize": settings.audio_batch_claim_size}
+
+    @app.post("/api/v1/audio/batches/{batch_id}/retry-failed")
+    def retry_audio_batch_failed(
+        batch_id: str,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Dict[str, Any]:
+        """Requeue FAILED records only; ready records are never regenerated."""
+        _require_writer(principal)
+        _require_audio_provider_configured()
+        retried = app.state.db.retry_failed_audio_batch_items(principal.tenant_id, batch_id)
+        if retried is None:
+            raise ApiError(404, "audio batch not found", "not_found")
+        count, job = retried
+        if count == 0:
+            raise ApiError(409, "audio batch has no failed records", "batch_no_failed_items")
+        app.state.db.audit(
+            principal.tenant_id,
+            principal.name,
+            "audio.batch_retried",
+            "audio_batch",
+            batch_id,
+            {"retried": count},
+        )
+        return job
+
+    @app.get("/api/v1/audio/batches/{batch_id}/report")
+    def download_audio_batch_report(
+        batch_id: str,
+        principal: TenantPrincipal = Depends(_principal_from_request),
+    ) -> Response:
+        job = app.state.db.get_audio_batch(principal.tenant_id, batch_id)
+        if job is None:
+            raise ApiError(404, "audio batch not found", "not_found")
+        return Response(
+            content=batch_report_csv(job),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="batch-{batch_id}.csv"'},
+        )
 
     # ------------------------------------------------------------- contacts
     @app.get("/api/v1/contacts")

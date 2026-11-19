@@ -13,6 +13,7 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
+import voxora.api as api_module
 import voxora.longform as longform_module
 from voxora.tts_generation import MockTTSProvider, TTSProviderError
 
@@ -55,8 +56,6 @@ class APIFailOnceProvider(MockTTSProvider):
 
 def _generate_long(client: TestClient, provider: Any = None, **overrides: Any):
     if provider is not None:
-        import voxora.api as api_module
-
         original = api_module.build_tts_provider
         api_module.build_tts_provider = lambda settings: provider  # type: ignore[assignment]
         try:
@@ -64,7 +63,7 @@ def _generate_long(client: TestClient, provider: Any = None, **overrides: Any):
                 "/api/v1/audio-assets/generate-long", json=_fail_payload(**overrides), headers=AUTH
             )
         finally:
-            longform_module.build_tts_provider = original
+            api_module.build_tts_provider = original
     return client.post(
         "/api/v1/audio-assets/generate-long", json=_fail_payload(**overrides), headers=AUTH
     )

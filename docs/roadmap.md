@@ -292,7 +292,9 @@ long-form chunking/assembly/retry. Pending: Phase E (CSV batch generation
 with background worker processing), Phase F (console Audio Generation
 section), Phase G (tests + docs sweep).**
 
-**Execution map (2026-11-20):**
+**Execution map (2026-11-20):** All new surfaces use the deterministic mock
+provider / explicit stubs — no paid API calls or live services in the standard
+suite or console demo paths.
 
 - [ ] **E — Persistence.** DB schema + methods for audio batch jobs/items
       (SQLite + Postgres), claim/retry/report seams.
@@ -300,8 +302,8 @@ section), Phase G (tests + docs sweep).**
       worker, rate-limit awareness.
 - [ ] **E — API.** Preview/create/list/detail/retry/report endpoints +
       Pydantic models.
-- [ ] **E — Tests.** Mocked-provider tests for CSV validation, worker, retry,
-      report.
+- [ ] **E — Tests.** Mocked-provider / stub tests for CSV validation, worker,
+      retry, report.
 - [ ] **F — Console.** Regenerate TS client, add audio API methods, build Audio
       Generation section (Generate / Batch / Library / Processing / Settings).
 - [ ] **G — Tests + docs.** Full test sweep, fix known test leaks, docs

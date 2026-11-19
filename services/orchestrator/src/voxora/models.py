@@ -180,6 +180,49 @@ class LongFormGenerate(BaseModel):
         return self
 
 
+class AudioBatchDefaults(BaseModel):
+    """Defaults applied to every CSV row that leaves a field blank (M10 E)."""
+
+    model_config = {"extra": "forbid"}
+
+    voice: str = Field(default="alloy", min_length=1, max_length=80)
+    model: Literal["tts-1", "tts-1-hd", "gpt-4o-mini-tts"] = "tts-1"
+    speed: float = Field(default=1.0, ge=0.25, le=4.0)
+    response_format: Literal["mp3", "opus", "aac", "flac", "wav", "pcm"] = "wav"
+    instructions: Optional[str] = Field(default=None, max_length=4096)
+    language: Optional[str] = Field(default=None, max_length=40)
+    title: Optional[str] = Field(default=None, max_length=120)
+    max_chunk_chars: int = Field(default=4096, ge=500, le=4096)
+
+    @model_validator(mode="after")
+    def _instructions_only_on_capable_models(self) -> "AudioBatchDefaults":
+        if self.instructions is not None and self.model != "gpt-4o-mini-tts":
+            raise ValueError("instructions is only supported with gpt-4o-mini-tts")
+        return self
+
+
+class AudioBatchRecord(BaseModel):
+    """One fully resolved CSV row; the parser reports errors with row numbers."""
+
+    model_config = {"extra": "forbid"}
+
+    script: str = Field(min_length=1, max_length=262144)
+    title: str = Field(min_length=1, max_length=120)
+    voice: str = Field(min_length=1, max_length=80)
+    model: Literal["tts-1", "tts-1-hd", "gpt-4o-mini-tts"] = "tts-1"
+    speed: float = Field(default=1.0, ge=0.25, le=4.0)
+    response_format: Literal["mp3", "opus", "aac", "flac", "wav", "pcm"] = "wav"
+    instructions: Optional[str] = Field(default=None, max_length=4096)
+    language: Optional[str] = Field(default=None, max_length=40)
+    max_chunk_chars: int = Field(default=4096, ge=500, le=4096)
+
+    @model_validator(mode="after")
+    def _instructions_only_on_capable_models(self) -> "AudioBatchRecord":
+        if self.instructions is not None and self.model != "gpt-4o-mini-tts":
+            raise ValueError("instructions is only supported with gpt-4o-mini-tts")
+        return self
+
+
 class VariantOp(BaseModel):
     """One non-destructive variant operation (roadmap M10 Phase C).
 
