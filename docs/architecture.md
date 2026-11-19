@@ -131,8 +131,9 @@ This keeps the pipeline semantics testable without carrying an audio stack.
 ## AI runtime (Python)
 
 `services/ai-runtime` implements the agent-turn contract: a deterministic,
-script-driven `MockAgent` that honestly reports `real_llm: False` in its
-capabilities. No real LLM client exists in this build.
+script-driven `MockAgent` (`real_llm: False`) and an opt-in `OpenRouterAgent`
+(`real_llm: True`) selected by `VOXORA_LLM_PROVIDER`. Neither is exercised live
+by tests or the demo.
 
 ## Console (React)
 

@@ -2438,7 +2438,7 @@ wheels = [
 
 [[package]]
 name = "voxora-ai-runtime"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "services/ai-runtime" }
 dependencies = [
     { name = "httpx" },
@@ -2462,7 +2462,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "voxora-orchestrator"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "services/orchestrator" }
 dependencies = [
     { name = "cryptography" },

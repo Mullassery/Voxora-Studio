@@ -222,9 +222,9 @@
     "semantic_hash": ""
   },
   "services/orchestrator/src/voxora/config.py": {
-    "mtime": 1795121452.7319276,
-    "seen": 1795122546.599369,
-    "ast_hash": "eb8894093d4866f83d47887b1a57be16",
+    "mtime": 1795122674.4213748,
+    "seen": 1795122828.70414,
+    "ast_hash": "e92f026e9ce503d2070ef62e16654118",
     "semantic_hash": ""
   },
   "services/orchestrator/src/voxora/crm/__init__.py": {
@@ -594,15 +594,15 @@
     "semantic_hash": ""
   },
   "docs/architecture.md": {
-    "mtime": 1793408826.4289386,
-    "seen": 1794442394.2665532,
-    "ast_hash": "bdaa628edf396cd85b5d3e7158d2df35",
+    "mtime": 1795122708.9146605,
+    "seen": 1795122828.7041721,
+    "ast_hash": "2afe6c09e2f460ed6df6add4407ab821",
     "semantic_hash": ""
   },
   "docs/implementation-audit.md": {
-    "mtime": 1794876221.3002841,
-    "seen": 1795122546.599405,
-    "ast_hash": "fb96eebdc4da58a310f4f3f4e174bf52",
+    "mtime": 1795122640.4998515,
+    "seen": 1795122828.704173,
+    "ast_hash": "0c59cca23321d83df03347bc67453680",
     "semantic_hash": ""
   },
   "docs/migration/capability-inventory.md": {
@@ -624,9 +624,9 @@
     "semantic_hash": ""
   },
   "docs/roadmap.md": {
-    "mtime": 1795121295.653701,
-    "seen": 1795122546.5994072,
-    "ast_hash": "112ebb9c18d81c812d877d320c6fd0de",
+    "mtime": 1795122602.0981596,
+    "seen": 1795122828.704174,
+    "ast_hash": "366b7861ee37a9b572e63a0f02a59645",
     "semantic_hash": ""
   },
   "docs/superpowers/plans/2026-11-12-m7-m8-live-loop-routing-analytics.md": {
@@ -732,9 +732,9 @@
     "semantic_hash": ""
   },
   "services/orchestrator/tests/test_audio_batch_api.py": {
-    "mtime": 1795121873.101799,
-    "seen": 1795122546.599388,
-    "ast_hash": "532b65b7b4d66fc5ccc9da2061f1ec53",
+    "mtime": 1795122690.262239,
+    "seen": 1795122828.7041569,
+    "ast_hash": "af1abbcc729fa79398b9763c998d7cce",
     "semantic_hash": ""
   },
   "services/orchestrator/tests/test_audio_batches.py": {

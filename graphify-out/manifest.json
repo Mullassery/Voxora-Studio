@@ -150,15 +150,15 @@
     "semantic_hash": ""
   },
   "services/ai-runtime/pyproject.toml": {
-    "mtime": 1793544057.8000548,
-    "seen": 1794442394.266525,
-    "ast_hash": "3f56c448a219c6cabed3fdb5ba24540d",
+    "mtime": 1795123001.662708,
+    "seen": 1795123457.3110888,
+    "ast_hash": "c526ae598ed8eaa6b13642688af3db07",
     "semantic_hash": ""
   },
   "services/ai-runtime/src/voxora_ai/__init__.py": {
-    "mtime": 1793666710.1344712,
-    "seen": 1794442394.266525,
-    "ast_hash": "0d7e25b029438a9d61ce0948a38c55de",
+    "mtime": 1795123386.5952468,
+    "seen": 1795123457.31109,
+    "ast_hash": "83346dc74c8c04520424da2adfde1e2e",
     "semantic_hash": ""
   },
   "services/ai-runtime/src/voxora_ai/engine.py": {
@@ -186,9 +186,9 @@
     "semantic_hash": ""
   },
   "services/orchestrator/pyproject.toml": {
-    "mtime": 1795121748.1162198,
-    "seen": 1795122546.5993652,
-    "ast_hash": "fb3b2a25e23996b2b5e28b4fd58ff941",
+    "mtime": 1795122984.4365427,
+    "seen": 1795123457.311092,
+    "ast_hash": "a7d123abff3d5d9ecf20c4848731e789",
     "semantic_hash": ""
   },
   "services/orchestrator/scripts/generate_ts_client.py": {
@@ -198,9 +198,9 @@
     "semantic_hash": ""
   },
   "services/orchestrator/src/voxora/__init__.py": {
-    "mtime": 1793326190.076626,
-    "seen": 1794442394.266528,
-    "ast_hash": "366ecc0c9bbbac8eca041b18b952e814",
+    "mtime": 1795122995.9687078,
+    "seen": 1795123457.311093,
+    "ast_hash": "adda081a3e100be034f42bb376d7319a",
     "semantic_hash": ""
   },
   "services/orchestrator/src/voxora/__main__.py": {
@@ -570,9 +570,9 @@
     "semantic_hash": ""
   },
   "README.md": {
-    "mtime": 1794275837.8619413,
-    "seen": 1794442394.266551,
-    "ast_hash": "0b0168397a7346b21ef74b9ea1ac129d",
+    "mtime": 1795123357.937343,
+    "seen": 1795123457.311126,
+    "ast_hash": "c0b4d1eb84172bb67d633eda944f4c55",
     "semantic_hash": ""
   },
   "apps/console/index.html": {
@@ -594,15 +594,15 @@
     "semantic_hash": ""
   },
   "docs/architecture.md": {
-    "mtime": 1795122708.9146605,
-    "seen": 1795122828.7041721,
-    "ast_hash": "2afe6c09e2f460ed6df6add4407ab821",
+    "mtime": 1795123381.4785962,
+    "seen": 1795123457.3111281,
+    "ast_hash": "98019beed722c2745588830bd1520818",
     "semantic_hash": ""
   },
   "docs/implementation-audit.md": {
-    "mtime": 1795122640.4998515,
-    "seen": 1795122828.704173,
-    "ast_hash": "0c59cca23321d83df03347bc67453680",
+    "mtime": 1795122833.5263221,
+    "seen": 1795123457.3111281,
+    "ast_hash": "6b0bf569c6c3f9abb42e8b75ae8f7b02",
     "semantic_hash": ""
   },
   "docs/migration/capability-inventory.md": {
